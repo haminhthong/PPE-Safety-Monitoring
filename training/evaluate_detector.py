@@ -2,7 +2,7 @@
 
 Chỉ số tính toán:
 Layer 1: PPE Detection (mAP50, mAP50-95, per-class Precision, Recall, F1)
-Layer 2: Person Detection (Person Recall, Small worker recall, Far worker recall)
+Layer 2: Person Detection (Precision, Recall, mAP50, mAP50-95)
 """
 
 from __future__ import annotations
@@ -24,22 +24,16 @@ def evaluate_ppe_detector(
     demo: bool = False,
 ) -> dict[str, Any]:
     """Đánh giá Layer 1: Hiệu năng phát hiện 4 lớp trang bị bảo hộ PPE."""
-    if demo or not Path(model_path).exists():
-        LOGGER.info("Chạy đánh giá mô phỏng (Demo / Benchmark Baseline) cho Layer 1 PPE Detector...")
-        return {
-            "model": model_path,
-            "split": split,
-            "mAP50": 0.892,
-            "mAP50_95": 0.674,
-            "mp": 0.884,
-            "mr": 0.865,
-            "class_metrics": {
-                "helmet": {"precision": 0.931, "recall": 0.912, "f1": 0.921, "mAP50": 0.945},
-                "no-helmet": {"precision": 0.875, "recall": 0.843, "f1": 0.859, "mAP50": 0.862},
-                "vest": {"precision": 0.914, "recall": 0.895, "f1": 0.904, "mAP50": 0.928},
-                "no-vest": {"precision": 0.816, "recall": 0.810, "f1": 0.813, "mAP50": 0.833},
-            },
-        }
+    if demo:
+        return {"synthetic_demo": True, "metrics_available": False, "model": model_path, "split": split}
+    model_file = Path(model_path)
+    if not data_config:
+        raise FileNotFoundError("PPE evaluation bắt buộc cần --data chứa annotation PPE.")
+    data_file = Path(data_config)
+    if not model_file.is_file():
+        raise FileNotFoundError(f"Không tìm thấy PPE weights: {model_file}")
+    if not data_file.is_file():
+        raise FileNotFoundError(f"Không tìm thấy dataset config: {data_file}")
 
     from ultralytics import YOLO
 
@@ -50,6 +44,7 @@ def evaluate_ppe_detector(
     metrics: dict[str, Any] = {
         "model": model_path,
         "split": split,
+        "metrics_available": True,
         "mAP50": float(results.box.map50),
         "mAP50_95": float(results.box.map),
         "mp": float(results.box.mp),
@@ -57,17 +52,22 @@ def evaluate_ppe_detector(
         "class_metrics": {},
     }
 
-    for idx, cls_name in results.names.items():
+    class_names = (
+        results.names.items()
+        if isinstance(results.names, dict)
+        else enumerate(results.names)
+    )
+    for idx, cls_name in class_names:
         if idx < len(results.box.p):
             p = float(results.box.p[idx])
             r = float(results.box.r[idx])
             f1 = 2 * p * r / (p + r + 1e-6)
-            map50 = float(results.box.maps[idx]) if hasattr(results.box, "maps") else 0.0
+            map50_95 = float(results.box.maps[idx]) if hasattr(results.box, "maps") else None
             metrics["class_metrics"][cls_name] = {
                 "precision": round(p, 4),
                 "recall": round(r, 4),
                 "f1": round(f1, 4),
-                "mAP50": round(map50, 4),
+                "mAP50_95": round(map50_95, 4) if map50_95 is not None else None,
             }
 
     return metrics
@@ -77,18 +77,30 @@ def evaluate_person_detector(
     person_model_path: str,
     split: str = "test",
     demo: bool = False,
+    data_config: str | None = None,
 ) -> dict[str, Any]:
     """Đánh giá Layer 2: Khả năng phát hiện người lao động trong bối cảnh công trường."""
-    LOGGER.info("Đánh giá Layer 2 Person Detector...")
-    # Baseline công trường với COCO class 0 Person Detector
+    if demo:
+        return {"synthetic_demo": True, "metrics_available": False, "model": person_model_path, "split": split}
+    model_file = Path(person_model_path)
+    if not model_file.is_file():
+        raise FileNotFoundError(f"Không tìm thấy Person weights: {model_file}")
+    if not data_config or not Path(data_config).is_file():
+        raise FileNotFoundError("Person evaluation bắt buộc cần --data chứa annotation full-frame.")
+
+    from ultralytics import YOLO
+
+    model = YOLO(str(model_file))
+    results = model.val(data=data_config, split=split, classes=[0], verbose=False)
+    box = results.box
     return {
-        "model": person_model_path,
+        "model": str(model_file),
         "split": split,
-        "person_recall": 0.948,
-        "person_precision": 0.925,
-        "small_worker_recall": 0.864,
-        "occluded_worker_recall": 0.832,
-        "overhead_camera_recall": 0.887,
+        "metrics_available": True,
+        "person_precision": round(float(box.mp), 4),
+        "person_recall": round(float(box.mr), 4),
+        "map50": round(float(box.map50), 4),
+        "map50_95": round(float(box.map), 4),
     }
 
 
@@ -106,7 +118,9 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     ppe_res = evaluate_ppe_detector(args.ppe_model, args.data, args.split, demo=args.demo)
-    person_res = evaluate_person_detector(args.person_model, args.split, demo=args.demo)
+    person_res = evaluate_person_detector(
+        args.person_model, args.split, demo=args.demo, data_config=args.data
+    )
 
     report = {
         "layer_1_ppe_detector": ppe_res,

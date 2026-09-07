@@ -27,124 +27,139 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("evaluate_system")
 
 
-def calculate_stage_wise_funnel() -> dict[str, Any]:
-    """Tính toán phễu suy luận hệ thống (Stage-Wise Funnel)."""
+def calculate_stage_wise_funnel(stage_counts: dict[str, int]) -> dict[str, Any]:
+    """Tính funnel từ số đếm trong locked test, không dựng số liệu mẫu."""
+    if not stage_counts:
+        raise ValueError("Cần stage_counts từ locked test để tính funnel.")
+    stages = []
+    previous = None
+    first = next(iter(stage_counts.values()))
+    if first <= 0:
+        raise ValueError("Stage đầu tiên phải có ít nhất một mẫu.")
+    for stage, count in stage_counts.items():
+        if count < 0:
+            raise ValueError("Stage count không được âm.")
+        if previous is not None and count > previous:
+            raise ValueError("Funnel phải không tăng giữa các stage.")
+        stage_recall = count / previous if previous is not None else 1.0
+        stages.append({
+            "stage": stage,
+            "count": count,
+            "stage_recall": round(stage_recall, 4),
+            "cumulative_recall": round(count / first, 4),
+        })
+        previous = count
+    return {"stages": stages, "source": "locked_test_artifacts"}
+
+
+def calculate_policy_ablation(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Đọc ablation đã chạy thật từ artifacts; không tự sinh benchmark."""
+    if not reports:
+        raise ValueError("Ablation report trống; không được xuất số liệu giả.")
+    return reports
+
+
+def calculate_pareto_frontier(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Đọc kết quả model candidates từ validation artifacts."""
+    if not candidates:
+        raise ValueError("Chưa có validation artifacts để so sánh model.")
+    return candidates
+
+
+def run_full_system_evaluation(
+    ppe_model: str | None = None,
+    person_model: str | None = None,
+    data_config: str | None = None,
+    gt_tracks: list[dict[str, Any]] | None = None,
+    pred_tracks: list[dict[str, Any]] | None = None,
+    gt_events: list[dict[str, Any]] | None = None,
+    pred_events: list[dict[str, Any]] | None = None,
+    gt_to_pred_map: dict[int, int] | None = None,
+    duration_hours: float | None = None,
+    demo: bool = False,
+) -> dict[str, Any]:
+    """Đánh giá end-to-end từ artifacts thật hoặc trả metadata demo rõ ràng."""
+    if demo:
+        return {"synthetic_demo": True, "metrics_available": False}
+    required = {
+        "ppe_model": ppe_model,
+        "person_model": person_model,
+        "data_config": data_config,
+        "gt_tracks": gt_tracks,
+        "pred_tracks": pred_tracks,
+        "gt_events": gt_events,
+        "pred_events": pred_events,
+        "duration_hours": duration_hours,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise ValueError(f"Final evaluation thiếu artifact bắt buộc: {', '.join(missing)}")
     return {
-        "stages": [
-            {"stage": "1. GT Workers in Scene", "count": 100, "stage_recall": 1.0, "cumulative_recall": 1.0},
-            {"stage": "2. Person Detected (COCO Class 0)", "count": 95, "stage_recall": 0.950, "cumulative_recall": 0.950},
-            {"stage": "3. Multi-Object Tracked (ByteTrack)", "count": 93, "stage_recall": 0.979, "cumulative_recall": 0.930},
-            {"stage": "4. PPE State Correctly Recognized", "count": 89, "stage_recall": 0.957, "cumulative_recall": 0.890},
-            {"stage": "5. Violation Events Correctly Emitted", "count": 86, "stage_recall": 0.966, "cumulative_recall": 0.860},
-        ],
-        "system_bottleneck": "Person Detector Miss on Small/Far Workers sets upper bound on Recall: SystemRecall <= PersonRecall",
+        "system_name": "PPE Safety Monitoring",
+        "evaluation_protocol": "locked_test_full_video",
+        "layer_1_and_2_perception": {
+            "ppe_detector": evaluate_ppe_detector(ppe_model, data_config, "test"),
+            "person_detector": evaluate_person_detector(person_model, "test", data_config=data_config),
+        },
+        "layer_3_tracking": evaluate_tracking_trajectories(gt_tracks, pred_tracks),
+        "layer_4_violation_events": evaluate_violation_events(
+            gt_events,
+            pred_events,
+            duration_hours=duration_hours,
+            gt_to_pred_map=gt_to_pred_map,
+        ),
     }
-
-
-def calculate_policy_ablation() -> list[dict[str, Any]]:
-    """Phân tích bóc tách (Ablation Study) chứng minh giá trị từng tầng chính sách."""
-    return [
-        {
-            "policy": "1. Direct Single Detection (Baseline)",
-            "event_precision": 0.684,
-            "event_recall": 0.942,
-            "false_alerts_per_hour": 18.5,
-            "median_time_to_alert_sec": 0.05,
-            "notes": "Nhạy nhất nhưng cảnh báo rác rất nhiều (18.5 báo động giả/giờ).",
-        },
-        {
-            "policy": "2. + Conflict Margin (0.10)",
-            "event_precision": 0.761,
-            "event_recall": 0.928,
-            "false_alerts_per_hour": 11.2,
-            "median_time_to_alert_sec": 0.05,
-            "notes": "Loại bỏ hiện tượng detector trả cùng lúc cả helmet và no-helmet.",
-        },
-        {
-            "policy": "3. + Temporal Confirmation FSM (3 observations)",
-            "event_precision": 0.895,
-            "event_recall": 0.886,
-            "false_alerts_per_hour": 2.1,
-            "median_time_to_alert_sec": 0.35,
-            "notes": "Giảm 88.6% báo động giả; độ trễ 0.35s hoàn toàn chấp nhận được.",
-        },
-        {
-            "policy": "4. + Spatial Body-Zone Association (Full Platform)",
-            "event_precision": 0.938,
-            "event_recall": 0.874,
-            "false_alerts_per_hour": 1.1,
-            "median_time_to_alert_sec": 0.35,
-            "notes": "Triệt tiêu rủi ro gán nhầm trang bị trong đám đông đứng sát nhau.",
-        },
-    ]
-
-
-def calculate_pareto_frontier() -> list[dict[str, Any]]:
-    """So sánh đường biên Pareto giữa 2 ứng viên mô hình YOLOv8n và YOLOv8s."""
-    return [
-        {
-            "candidate": "YOLOv8n-PPE (Champion Edge)",
-            "params_m": 3.2,
-            "map50_95": 0.674,
-            "no_helmet_recall": 0.843,
-            "no_vest_recall": 0.810,
-            "p95_latency_ms_gpu": 7.4,
-            "p95_latency_ms_cpu": 32.1,
-            "recommendation": "Tối ưu cho Edge Camera và máy chủ giám sát nhiều luồng (Multi-stream).",
-        },
-        {
-            "candidate": "YOLOv8s-PPE (High-Capacity Candidate)",
-            "params_m": 11.2,
-            "map50_95": 0.698,
-            "no_helmet_recall": 0.865,
-            "no_vest_recall": 0.834,
-            "p95_latency_ms_gpu": 14.8,
-            "p95_latency_ms_cpu": 86.5,
-            "recommendation": "Độ chính xác nhỉnh hơn 2.4% mAP nhưng tiêu hao gấp đôi tài nguyên GPU.",
-        },
-    ]
-
-
-def run_full_system_evaluation(demo: bool = True) -> dict[str, Any]:
-    """Thực thi đánh giá đa tầng thống nhất."""
-    LOGGER.info("Bắt đầu đánh giá toàn diện hệ thống PPE 4 tầng...")
-
-    layer1_2 = {
-        "ppe_detector": evaluate_ppe_detector("models/best.pt", demo=demo),
-        "person_detector": evaluate_person_detector("models/yolov8n.pt", demo=demo),
-    }
-    layer3 = evaluate_tracking_trajectories([], [])
-    layer4 = evaluate_violation_events(
-        events_gt=[
-            {"track_id": 1, "violation_type": "helmet", "time_seconds": 10.5},
-            {"track_id": 2, "violation_type": "vest", "time_seconds": 25.0},
-        ],
-        events_pred=[
-            {"track_id": 101, "violation_type": "helmet", "time_seconds": 11.0},
-            {"track_id": 102, "violation_type": "vest", "time_seconds": 25.3},
-        ],
-    )
-
-    report = {
-        "system_name": "PPE Safety Surveillance Platform",
-        "evaluation_protocol": "4-Layer Hierarchical Evaluation",
-        "layer_1_and_2_perception": layer1_2,
-        "layer_3_tracking": layer3,
-        "layer_4_violation_events": layer4,
-        "stage_wise_funnel": calculate_stage_wise_funnel(),
-        "decision_policy_ablation": calculate_policy_ablation(),
-        "model_pareto_frontier": calculate_pareto_frontier(),
-    }
-    return report
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá toàn diện hệ thống PPE 4 tầng")
-    parser.add_argument("--demo", action="store_true", default=True, help="Chạy đánh giá benchmark chuẩn")
+    parser.add_argument("--ppe-model", required=False, help="PPE weights đã freeze")
+    parser.add_argument("--person-model", required=False, help="Person weights đã freeze")
+    parser.add_argument("--data", required=False, help="Dataset config full-frame/PPE")
+    parser.add_argument("--gt-tracks", help="JSON GT trajectories")
+    parser.add_argument("--pred-tracks", help="JSON predicted trajectories")
+    parser.add_argument("--gt-events", help="JSON GT interval events")
+    parser.add_argument("--pred-events", help="JSON predicted events")
+    parser.add_argument("--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID")
+    parser.add_argument("--duration-hours", type=float, help="Tổng thời lượng locked test")
+    parser.add_argument("--demo", action="store_true", help="Chỉ trả metadata demo, không phải benchmark")
     parser.add_argument("--output", default="runs/system_evaluation_report.json", help="File xuất báo cáo")
     args = parser.parse_args()
 
-    report = run_full_system_evaluation(demo=args.demo)
+    def load_json(path: str | None) -> list[dict[str, Any]] | None:
+        if not path:
+            return None
+        file = Path(path)
+        if not file.is_file():
+            parser.error(f"Không tìm thấy artifact: {file}")
+        value = json.loads(file.read_text(encoding="utf-8"))
+        if not isinstance(value, list):
+            parser.error(f"Artifact phải là JSON array: {file}")
+        return value
+
+    def load_id_map(path: str | None) -> dict[int, int] | None:
+        if not path:
+            return None
+        file = Path(path)
+        if not file.is_file():
+            parser.error(f"Không tìm thấy identity map: {file}")
+        value = json.loads(file.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            parser.error("Identity map phải là JSON object.")
+        return {int(key): int(mapped) for key, mapped in value.items()}
+
+    report = run_full_system_evaluation(
+        ppe_model=args.ppe_model,
+        person_model=args.person_model,
+        data_config=args.data,
+        gt_tracks=load_json(args.gt_tracks),
+        pred_tracks=load_json(args.pred_tracks),
+        gt_events=load_json(args.gt_events),
+        pred_events=load_json(args.pred_events),
+        gt_to_pred_map=load_id_map(args.gt_to_pred_map),
+        duration_hours=args.duration_hours,
+        demo=args.demo,
+    )
     out_p = Path(args.output)
     out_p.parent.mkdir(parents=True, exist_ok=True)
     with out_p.open("w", encoding="utf-8") as f:

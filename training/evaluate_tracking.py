@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -23,24 +24,27 @@ LOGGER = logging.getLogger("evaluate_tracking")
 
 def evaluate_tracking_trajectories(
     gt_trajectories: list[dict[str, Any]],
-    pred_trajectories: list[dict[str, Any]],
+    pred_trajectories: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Tính toán các chỉ số tracking dựa trên tập quỹ đạo GT và Predicted.
+    """Tính metric tracking thật bằng ``motmetrics``.
 
-    Mỗi trajectory dict có dạng:
-    {"frame_id": int, "track_id": int, "box": [x1, y1, x2, y2]}
+    Không có annotation trajectory thì metric là không khả dụng và hàm sẽ
+    dừng thay vì trả số liệu minh họa.
     """
     if not gt_trajectories:
-        return {
-            "idf1": 0.885,
-            "id_switches": 4,
-            "fragmentations": 6,
-            "mota": 0.842,
-            "mostly_tracked_ratio": 0.912,
-            "mostly_lost_ratio": 0.035,
-        }
+        raise ValueError("Tracking evaluation bắt buộc cần GT trajectories thật.")
 
-    # Gom nhóm theo frame_id
+    if pred_trajectories is None:
+        raise ValueError("Tracking evaluation bắt buộc cần predicted trajectories.")
+
+    try:
+        import motmetrics as mm
+    except ImportError as error:
+        raise RuntimeError(
+            "Thiếu motmetrics. Hãy cài requirements-dev.txt để đánh giá tracking chuẩn."
+        ) from error
+
+    # Gom nhóm theo frame_id để tạo accumulator chuẩn MOT.
     gt_by_frame: dict[int, list[dict]] = defaultdict(list)
     pred_by_frame: dict[int, list[dict]] = defaultdict(list)
 
@@ -49,63 +53,34 @@ def evaluate_tracking_trajectories(
     for item in pred_trajectories:
         pred_by_frame[item["frame_id"]].append(item)
 
-    # Đếm số khung hình của từng GT track
-    gt_track_lengths: Counter = defaultdict(int)
-    for item in gt_trajectories:
-        gt_track_lengths[item["track_id"]] += 1
-
-    # Theo dõi ánh xạ GT ID -> Pred ID qua các frame
-    gt_to_pred_history: dict[int, list[int]] = defaultdict(list)
-    id_switches = 0
-    fragmentations = 0
-
-    all_frames = sorted(set(gt_by_frame.keys()) | set(pred_by_frame.keys()))
-    prev_active_preds: set[int] = set()
-
-    for fid in all_frames:
+    accumulator = mm.MOTAccumulator(auto_id=True)
+    for fid in sorted(set(gt_by_frame) | set(pred_by_frame)):
         curr_gts = gt_by_frame[fid]
         curr_preds = pred_by_frame[fid]
+        gt_ids = [item["track_id"] for item in curr_gts]
+        pred_ids = [item["track_id"] for item in curr_preds]
+        gt_boxes = [item["box"] for item in curr_gts]
+        pred_boxes = [item["box"] for item in curr_preds]
+        distances = mm.distances.iou_matrix(gt_boxes, pred_boxes, max_iou=0.5)
+        accumulator.update(gt_ids, pred_ids, distances, frameid=fid)
 
-        # Ghép cặp đơn giản theo khoảng cách tâm hoặc IoU
-        matched_gt_pred: dict[int, int] = {}
-        for gt in curr_gts:
-            gx = (gt["box"][0] + gt["box"][2]) / 2.0
-            gy = (gt["box"][1] + gt["box"][3]) / 2.0
-            best_dist = float("inf")
-            best_pid = None
+    metrics = ["idf1", "id_switches", "fragmentations", "mota", "mostly_tracked", "mostly_lost"]
+    summary = mm.metrics.create().compute(accumulator, metrics=metrics, name="evaluation")
+    values = summary.loc["evaluation"]
 
-            for pr in curr_preds:
-                px = (pr["box"][0] + pr["box"][2]) / 2.0
-                py = (pr["box"][1] + pr["box"][3]) / 2.0
-                dist = ((gx - px) ** 2 + (gy - py) ** 2) ** 0.5
-                if dist < 60.0 and dist < best_dist:
-                    best_dist = dist
-                    best_pid = pr["track_id"]
+    def metric_float(value: Any) -> float:
+        number = float(value)
+        return number if math.isfinite(number) else 0.0
 
-            if best_pid is not None:
-                matched_gt_pred[gt["track_id"]] = best_pid
-
-        for gid, pid in matched_gt_pred.items():
-            hist = gt_to_pred_history[gid]
-            if hist and hist[-1] != pid:
-                id_switches += 1
-            hist.append(pid)
-
-    total_gts = len(gt_track_lengths)
-    tracked_well = sum(1 for gid, hist in gt_to_pred_history.items() if len(hist) >= 0.8 * gt_track_lengths[gid])
-    lost_mostly = sum(1 for gid, hist in gt_to_pred_history.items() if len(hist) <= 0.2 * gt_track_lengths[gid])
-
-    mt_ratio = tracked_well / max(1, total_gts)
-    ml_ratio = lost_mostly / max(1, total_gts)
-    idf1 = max(0.0, 1.0 - (id_switches * 0.02) - (ml_ratio * 0.3))
-
+    gt_count = len({item["track_id"] for item in gt_trajectories})
     return {
-        "idf1": round(idf1, 4),
-        "id_switches": id_switches,
-        "fragmentations": fragmentations,
-        "mota": round(max(0.0, idf1 * 0.95), 4),
-        "mostly_tracked_ratio": round(mt_ratio, 4),
-        "mostly_lost_ratio": round(ml_ratio, 4),
+        "metrics_available": True,
+        "idf1": round(metric_float(values["idf1"]), 4),
+        "id_switches": int(values["id_switches"]),
+        "fragmentations": int(values["fragmentations"]),
+        "mota": round(metric_float(values["mota"]), 4),
+        "mostly_tracked_ratio": round(metric_float(values["mostly_tracked"]) / max(gt_count, 1), 4),
+        "mostly_lost_ratio": round(metric_float(values["mostly_lost"]) / max(gt_count, 1), 4),
     }
 
 
@@ -116,14 +91,14 @@ def main() -> None:
     parser.add_argument("--output", default="runs/eval_tracking.json", help="File lưu báo cáo JSON")
     args = parser.parse_args()
 
-    gt_data = []
-    pred_data = []
-    if args.gt_tracks and Path(args.gt_tracks).exists():
-        with open(args.gt_tracks, encoding="utf-8") as f:
-            gt_data = json.load(f)
-    if args.pred_tracks and Path(args.pred_tracks).exists():
-        with open(args.pred_tracks, encoding="utf-8") as f:
-            pred_data = json.load(f)
+    if not args.gt_tracks or not args.pred_tracks:
+        parser.error("--gt-tracks và --pred-tracks là bắt buộc; không có fallback demo.")
+    gt_path = Path(args.gt_tracks)
+    pred_path = Path(args.pred_tracks)
+    if not gt_path.is_file() or not pred_path.is_file():
+        parser.error("Không tìm thấy file GT hoặc predicted trajectories.")
+    gt_data = json.loads(gt_path.read_text(encoding="utf-8"))
+    pred_data = json.loads(pred_path.read_text(encoding="utf-8"))
 
     metrics = evaluate_tracking_trajectories(gt_data, pred_data)
     out_p = Path(args.output)

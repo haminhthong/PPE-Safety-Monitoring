@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Đường dẫn file ảnh/video hoặc chỉ số camera (mặc định: 0)",
     )
     parser.add_argument(
+        "--policy",
+        default=str(Path(__file__).resolve().parent / "configs" / "runtime_policy.yaml"),
+        help="Runtime policy YAML; đây là nguồn cấu hình chính của production.",
+    )
+    parser.add_argument(
         "--person-model",
         default=None,
         help="Đường dẫn file model YOLO phát hiện người (ví dụ: models/yolov8n.pt)",
@@ -76,31 +81,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--img-size",
         type=int,
-        default=640,
+        default=None,
         help="Kích thước ảnh đầu vào cho YOLO inference (mặc định: 640)",
     )
     parser.add_argument(
         "--detect-interval",
         type=int,
-        default=4,
-        help="Chạy phát hiện mới sau mỗi N khung hình để tối ưu FPS (mặc định: 4)",
+        default=None,
+        help="Override cadence PPE (chỉ dùng debug); tracking vẫn theo policy.",
     )
     parser.add_argument(
         "--person-conf",
         type=float,
-        default=0.3,
+        default=None,
         help="Ngưỡng tin cậy tối thiểu cho phát hiện người (mặc định: 0.3)",
     )
     parser.add_argument(
         "--ppe-conf",
         type=float,
-        default=0.3,
+        default=None,
         help="Ngưỡng tin cậy tối thiểu cho phát hiện PPE (mặc định: 0.3)",
     )
     parser.add_argument(
         "--confirm-frames",
         type=int,
-        default=2,
+        default=None,
         help="Số lần phát hiện liên tiếp trước khi ghi nhận vi phạm chính thức (mặc định: 2)",
     )
     parser.add_argument(
@@ -166,21 +171,33 @@ def main() -> None:
     ppe_p = Path(args.ppe_model) if args.ppe_model else None
     output_p = Path(args.output_dir)
 
-    config = DetectionConfig(
-        person_model_path=person_p,
-        ppe_model_path=ppe_p,
-        image_size=args.img_size,
-        detection_interval=args.detect_interval,
-        person_confidence=args.person_conf,
-        ppe_confidence=args.ppe_conf,
-        violation_confirmations=args.confirm_frames,
-        enable_beep=not args.no_beep,
-        show_window=not args.no_display,
-        save_output=args.save,
-        save_snapshots=not args.no_snapshots,
-        output_dir=output_p,
-        demo_mode=is_demo,
-    )
+    overrides = {
+        "person_model_path": person_p,
+        "ppe_model_path": ppe_p,
+        "show_window": not args.no_display,
+        "enable_beep": not args.no_beep,
+        "save_output": args.save,
+        "save_snapshots": not args.no_snapshots,
+        "output_dir": output_p,
+        "demo_mode": is_demo,
+    }
+    if args.img_size is not None:
+        overrides["image_size"] = args.img_size
+    if args.detect_interval is not None:
+        overrides["ppe_detection_interval"] = args.detect_interval
+    if args.person_conf is not None:
+        overrides["person_confidence"] = args.person_conf
+    if args.ppe_conf is not None:
+        overrides["ppe_confidence"] = args.ppe_conf
+    if args.confirm_frames is not None:
+        LOGGER.warning("--confirm-frames chỉ dành cho API cũ; production dùng dwell time trong policy.")
+        overrides["violation_confirmations"] = args.confirm_frames
+
+    try:
+        config = DetectionConfig.load_from_policy(Path(args.policy), **overrides)
+    except (FileNotFoundError, ValueError) as error:
+        LOGGER.error("Runtime policy không hợp lệ: %s", error)
+        raise SystemExit(1) from None
 
     try:
         service = DetectionService(config)

@@ -40,3 +40,14 @@ def test_config_validation_demo_mode():
     """Kiểm tra bỏ qua kiểm tra file model khi bật demo_mode."""
     config = DetectionConfig(demo_mode=True)
     config.validate()  # Không bắn ra ngoại lệ
+
+
+def test_runtime_policy_maps_all_decision_fields() -> None:
+    """Policy phải điều khiển cadence, zone, overlap và temporal rules."""
+    config = DetectionConfig.load_from_policy(Path("configs/runtime_policy.yaml"), demo_mode=True)
+    assert config.detection_interval == 1
+    assert config.ppe_detection_interval == 4
+    assert config.track_ttl_seconds == 5.0
+    assert config.head_zone_max == 0.35
+    assert config.roi_overlap_threshold == 0.4
+    assert config.violation_confirm_seconds == 0.5

@@ -18,8 +18,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("evaluate_events")
 
@@ -31,28 +29,51 @@ def evaluate_violation_events(
     time_tolerance_sec: float = 3.0,
     gt_to_pred_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
-    """Tính toán chỉ số cấp độ hệ thống cảnh báo vi phạm (Event Level).
+    """Đánh giá event interval sau khi identity đã được map từ tracking.
 
-    Args:
-        events_gt: Danh sách sự kiện vi phạm thực tế Ground-Truth.
-        events_pred: Danh sách sự kiện vi phạm do hệ thống dự đoán.
-        duration_hours: Thời lượng tổng cộng của video (tính bằng giờ).
-        time_tolerance_sec: Cửa sổ thời gian dung sai tối đa (giây).
-        gt_to_pred_map: Ánh xạ từ GT Person ID sang Tracker ID dự đoán (nếu có từ Layer 3).
+    GT dùng ``start_sec``/``end_sec``; ``time_seconds`` vẫn được chấp nhận
+    như point event để tương thích dữ liệu cũ. Không có mapping thì chỉ các
+    ID trùng nhau mới được ghép, tuyệt đối không bỏ qua identity check.
     """
+    if duration_hours <= 0:
+        raise ValueError("duration_hours phải lớn hơn 0.")
     tp = 0
     fp = 0
     matched_gt: set[int] = set()
     time_to_alerts: list[float] = []
 
-    # Sắp xếp theo timestamp
-    preds_sorted = sorted(events_pred, key=lambda x: x.get("time_seconds", 0.0))
-    gts_sorted = sorted(events_gt, key=lambda x: x.get("time_seconds", 0.0))
+    def interval(event: dict[str, Any]) -> tuple[float, float]:
+        start = float(
+            event.get("start_sec", event.get("event_start_seconds", event.get("time_seconds", 0.0)))
+        )
+        end = float(event.get("end_sec", event.get("event_end_seconds", start)))
+        if end < start:
+            raise ValueError(f"Event có end trước start: {event}")
+        return start, end
+
+    def alert_time(event: dict[str, Any]) -> float:
+        return float(
+            event.get(
+                "alert_time_sec",
+                event.get(
+                    "alert_time_seconds",
+                    event.get(
+                        "alert_time",
+                        event.get(
+                            "time_seconds",
+                            event.get("start_sec", event.get("event_start_seconds", 0.0)),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    preds_sorted = sorted(events_pred, key=alert_time)
+    gts_sorted = sorted(events_gt, key=lambda x: interval(x)[0])
 
     for pred in preds_sorted:
         p_track = pred.get("track_id")
         p_type = pred.get("violation_type", "").lower()
-        p_time = pred.get("time_seconds", 0.0)
 
         matched_idx = None
         min_time_diff = float("inf")
@@ -63,25 +84,22 @@ def evaluate_violation_events(
 
             g_track = gt.get("track_id")
             g_type = gt.get("violation_type", "").lower()
-            g_time = gt.get("time_seconds", 0.0)
+            g_start, g_end = interval(gt)
 
             # Kiểm tra loại vi phạm
             if p_type != g_type:
                 continue
 
-            # Kiểm tra tính tương thích danh tính:
-            # Nếu có gt_to_pred_map thì dùng, nếu không kiểm tra xem ID có khớp hoặc khớp không gian
-            if gt_to_pred_map is not None:
-                if gt_to_pred_map.get(g_track) != p_track:
-                    continue
-            else:
-                # Nếu không có mapping, chấp nhận cùng ID hoặc vị trí không gian tương đồng
-                pass
+            expected_pred_track = gt_to_pred_map.get(g_track) if gt_to_pred_map else g_track
+            if expected_pred_track != p_track:
+                continue
 
-            dt = abs(p_time - g_time)
-            if dt <= time_tolerance_sec and dt < min_time_diff:
-                min_time_diff = dt
-                matched_idx = idx
+            p_time = alert_time(pred)
+            if g_start - time_tolerance_sec <= p_time <= g_end + time_tolerance_sec:
+                dt = max(0.0, p_time - g_start)
+                if dt < min_time_diff:
+                    min_time_diff = dt
+                    matched_idx = idx
 
         if matched_idx is not None:
             tp += 1
@@ -95,7 +113,16 @@ def evaluate_violation_events(
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall + 1e-6)
     far_per_hour = fp / max(0.001, duration_hours)
-    median_tta = float(np.median(time_to_alerts)) if time_to_alerts else 0.0
+    if time_to_alerts:
+        ordered_tta = sorted(time_to_alerts)
+        middle = len(ordered_tta) // 2
+        median_tta = (
+            ordered_tta[middle]
+            if len(ordered_tta) % 2
+            else (ordered_tta[middle - 1] + ordered_tta[middle]) / 2.0
+        )
+    else:
+        median_tta = 0.0
 
     return {
         "event_precision": round(precision, 4),
@@ -109,6 +136,7 @@ def evaluate_violation_events(
         "total_gt_events": len(gts_sorted),
         "total_pred_events": len(preds_sorted),
         "time_tolerance_sec": time_tolerance_sec,
+        "ground_truth_format": "interval",
     }
 
 
@@ -116,41 +144,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá Layer 4: Violation Events")
     parser.add_argument("--gt-events", default="", help="File JSON danh sách sự kiện Ground Truth")
     parser.add_argument("--pred-events", default="", help="File JSON danh sách sự kiện Predicted")
+    parser.add_argument("--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID")
     parser.add_argument("--duration-hours", type=float, default=1.0, help="Thời lượng video (giờ)")
     parser.add_argument("--tolerance", type=float, default=3.0, help="Dung sai thời gian (giây)")
     parser.add_argument("--output", default="runs/eval_events.json", help="File lưu báo cáo JSON")
     args = parser.parse_args()
 
-    gt_events = []
-    pred_events = []
-    if args.gt_events and Path(args.gt_events).exists():
-        with open(args.gt_events, encoding="utf-8") as f:
-            gt_events = json.load(f)
-    if args.pred_events and Path(args.pred_events).exists():
-        with open(args.pred_events, encoding="utf-8") as f:
-            pred_events = json.load(f)
-
-    # Nếu không truyền file, chạy benchmark mẫu minh họa
-    if not gt_events:
-        LOGGER.info("Chạy đánh giá benchmark mẫu Layer 4...")
-        gt_events = [
-            {"track_id": 1, "violation_type": "helmet", "time_seconds": 10.5},
-            {"track_id": 2, "violation_type": "vest", "time_seconds": 25.0},
-            {"track_id": 3, "violation_type": "helmet", "time_seconds": 45.2},
-            {"track_id": 4, "violation_type": "vest", "time_seconds": 78.0},
-        ]
-        pred_events = [
-            {"track_id": 101, "violation_type": "helmet", "time_seconds": 11.2},
-            {"track_id": 102, "violation_type": "vest", "time_seconds": 25.4},
-            {"track_id": 103, "violation_type": "helmet", "time_seconds": 46.0},
-            {"track_id": 105, "violation_type": "helmet", "time_seconds": 90.0},  # FP
-        ]
+    if not args.gt_events or not args.pred_events:
+        parser.error("--gt-events và --pred-events là bắt buộc; không có fallback demo.")
+    gt_path = Path(args.gt_events)
+    pred_path = Path(args.pred_events)
+    if not gt_path.is_file() or not pred_path.is_file():
+        parser.error("Không tìm thấy file GT hoặc predicted events.")
+    gt_events = json.loads(gt_path.read_text(encoding="utf-8"))
+    pred_events = json.loads(pred_path.read_text(encoding="utf-8"))
+    id_map = None
+    if args.gt_to_pred_map:
+        map_path = Path(args.gt_to_pred_map)
+        if not map_path.is_file():
+            parser.error(f"Không tìm thấy identity map: {map_path}")
+        raw_map = json.loads(map_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_map, dict):
+            parser.error("Identity map phải là JSON object.")
+        id_map = {int(key): int(value) for key, value in raw_map.items()}
 
     metrics = evaluate_violation_events(
         gt_events,
         pred_events,
         duration_hours=args.duration_hours,
         time_tolerance_sec=args.tolerance,
+        gt_to_pred_map=id_map,
     )
 
     out_p = Path(args.output)

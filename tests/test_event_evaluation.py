@@ -45,3 +45,23 @@ def test_event_matching_type_mismatch_fails() -> None:
     assert metrics["false_negatives"] == 1
     assert metrics["event_precision"] == 0.0
     assert metrics["event_recall"] == 0.0
+
+
+def test_interval_event_uses_alert_time_and_identity_map() -> None:
+    """Event interval phải ghép đúng cửa sổ thời gian và identity map."""
+    metrics = evaluate_violation_events(
+        events_gt=[
+            {"track_id": 7, "violation_type": "vest", "start_sec": 10.0, "end_sec": 14.0}
+        ],
+        events_pred=[
+            {
+                "track_id": 42,
+                "violation_type": "vest",
+                "alert_time_seconds": 11.2,
+            }
+        ],
+        duration_hours=1.0,
+        gt_to_pred_map={7: 42},
+    )
+    assert metrics["true_positives"] == 1
+    assert metrics["median_time_to_alert_sec"] == 1.2

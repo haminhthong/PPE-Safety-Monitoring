@@ -32,12 +32,14 @@ class ViolationEvent:
     time_seconds: float
     detected_at: str
     snapshot_path: str = ""
+    event_start_seconds: float = 0.0
+    alert_time_seconds: float = 0.0
 
 
 class SessionReport:
     """Thu thập, tổng hợp số liệu và ghi báo cáo cho một phiên giám sát."""
 
-    def __init__(self, source: int | str) -> None:
+    def __init__(self, source: int | str, resolved_config: dict | None = None) -> None:
         """Khởi tạo phiên làm việc.
 
         Args:
@@ -48,6 +50,9 @@ class SessionReport:
         self.events: list[ViolationEvent] = []
         self.total_frames = 0
         self.unique_track_ids: set[int] = set()
+        self.ppe_observations = 0
+        self.unknown_ppe_observations = 0
+        self.resolved_config = resolved_config or {}
 
     @property
     def counts(self) -> dict[str, int]:
@@ -72,8 +77,10 @@ class SessionReport:
         track_id: int,
         kind: str,
         frame_id: int,
-        fps: float,
+        fps: float | None = None,
         snapshot_path: str = "",
+        time_seconds: float | None = None,
+        event_start_seconds: float | None = None,
     ) -> None:
         """Ghi nhận một sự kiện vi phạm mới vào danh sách.
 
@@ -84,7 +91,14 @@ class SessionReport:
             fps: Tốc độ khung hình (khung/giây).
             snapshot_path: Đường dẫn tới file ảnh snapshot bằng chứng.
         """
-        time_sec = round((frame_id - 1) / fps, 3) if fps > 0.0 else 0.0
+        if time_seconds is None:
+            time_seconds = round((frame_id - 1) / fps, 3) if fps and fps > 0.0 else 0.0
+        time_seconds = round(time_seconds, 3)
+        event_start_seconds = (
+            round(event_start_seconds, 3)
+            if event_start_seconds is not None
+            else time_seconds
+        )
         iso_now = datetime.now().astimezone().isoformat(timespec="seconds")
 
         self.events.append(
@@ -92,7 +106,9 @@ class SessionReport:
                 track_id=track_id,
                 violation_type=kind,
                 frame_id=frame_id,
-                time_seconds=time_sec,
+                time_seconds=time_seconds,
+                event_start_seconds=event_start_seconds,
+                alert_time_seconds=time_seconds,
                 detected_at=iso_now,
                 snapshot_path=snapshot_path,
             )
@@ -118,6 +134,9 @@ class SessionReport:
             "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "total_frames": self.total_frames,
             "unique_people_tracked": len(self.unique_track_ids),
+            "ppe_observations": self.ppe_observations,
+            "unknown_ppe_observations": self.unknown_ppe_observations,
+            "resolved_config": self.resolved_config,
             "violations_summary": self.counts,
             "events": [asdict(event) for event in self.events],
         }
@@ -132,6 +151,8 @@ class SessionReport:
                     "violation_type",
                     "frame_id",
                     "time_seconds",
+                    "event_start_seconds",
+                    "alert_time_seconds",
                     "detected_at",
                     "snapshot_path",
                 ],

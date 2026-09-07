@@ -1,11 +1,11 @@
-"""Script kiểm toán dataset tự động (Dataset Audit & Anti-Leakage Validator).
+"""Kiểm toán manifest ảnh thật và giao thức chống rò rỉ.
 
 Kiểm tra:
 1. Tính toàn vẹn của chiến lược phân chia theo nhóm (Group-Aware Splitting): Không có session nào xuất hiện ở nhiều split.
-2. Kiểm tra Test B: Tập Test phải chứa camera độc lập chưa xuất hiện ở tập Train (unseen camera validation).
+2. Kiểm tra test có camera độc lập nếu protocol yêu cầu.
 3. Kiểm tra tính duy nhất của mã băm SHA-256 (không có ảnh trùng lặp).
 4. Thống kê phân phối nhãn chi tiết (helmet, no-helmet, vest, no-vest).
-5. Xuất báo cáo chuẩn `training/dataset_report.json` làm nguồn chân lý duy nhất (Single Source of Truth).
+5. Ghi trạng thái evidence; không tạo benchmark nếu audit thất bại.
 """
 
 from __future__ import annotations
@@ -14,9 +14,13 @@ import argparse
 import csv
 import json
 import logging
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+
+try:
+    from .build_manifest import image_phash, sha256_file
+except ImportError:
+    from build_manifest import image_phash, sha256_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("audit_dataset")
@@ -26,13 +30,20 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
     if not manifest_path.exists():
         raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
 
-    rows: list[dict[str, str]] = []
-    with manifest_path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            rows.append(r)
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        rows = list(reader)
+        required = {
+            "sample_id", "recording_session", "camera_id", "site_id", "split",
+            "image_path", "label_path", "class_labels", "file_sha256", "image_phash",
+        }
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Manifest thiếu cột bắt buộc: {sorted(missing)}")
 
     total_samples = len(rows)
+    if total_samples == 0:
+        raise ValueError("Manifest không có mẫu nào.")
     LOGGER.info("Auditing manifest: %s (%d total samples)", manifest_path, total_samples)
 
     # 1. Group check: recording_session per split
@@ -41,6 +52,9 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
     sha256_map: dict[str, str] = {}
     phash_map: dict[str, str] = {}
     duplicate_sha256: list[str] = []
+    duplicate_phash: list[str] = []
+    invalid_files: list[str] = []
+    invalid_hashes: list[str] = []
 
     split_counts: Counter[str] = Counter()
     class_distribution: dict[str, Counter[str]] = {
@@ -55,18 +69,38 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
         sess = row["recording_session"]
         cam = row["camera_id"]
         split = row["split"].lower()
-        sha = row["sha256"]
-        phash = row.get("phash", "")
+        if split not in {"train", "val", "test"}:
+            raise ValueError(f"Split không hợp lệ: {split}")
+        sha = row["file_sha256"]
+        phash = row["image_phash"]
         labels = [lbl.strip() for lbl in row["class_labels"].split(";") if lbl.strip()]
 
         split_counts[split] += 1
         session_splits[sess].add(split)
         camera_splits[cam].add(split)
 
+        image_path = Path(row["image_path"])
+        label_path = Path(row["label_path"])
+        if not image_path.is_absolute():
+            image_path = (manifest_path.parent / image_path).resolve()
+        if not label_path.is_absolute():
+            label_path = (manifest_path.parent / label_path).resolve()
+        if not image_path.is_file() or not label_path.is_file():
+            invalid_files.append(sample_id)
+        else:
+            actual_sha = sha256_file(image_path)
+            actual_phash = image_phash(image_path)
+            if actual_sha != sha or actual_phash != phash:
+                invalid_hashes.append(sample_id)
+
         if sha in sha256_map:
             duplicate_sha256.append(f"{sample_id} duplicates {sha256_map[sha]}")
         else:
             sha256_map[sha] = sample_id
+        if phash in phash_map:
+            duplicate_phash.append(f"{sample_id} gần/trùng {phash_map[phash]}")
+        else:
+            phash_map[phash] = sample_id
 
         for lbl in labels:
             class_distribution[split][lbl] += 1
@@ -80,8 +114,13 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
     test_cams = {cam for cam, sp in camera_splits.items() if "test" in sp}
     unseen_test_cameras = sorted(test_cams - train_cams)
 
-    is_leak_free = len(leaked_sessions) == 0
-    has_unseen_cameras = len(unseen_test_cameras) >= 2
+    is_leak_free = (
+        len(leaked_sessions) == 0
+        and not invalid_files
+        and not invalid_hashes
+        and not duplicate_sha256
+    )
+    has_unseen_cameras = bool(unseen_test_cameras)
 
     report = {
         "manifest_path": str(manifest_path),
@@ -101,6 +140,10 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
             "unseen_test_cameras": unseen_test_cameras,
         },
         "exact_duplicates_count": len(duplicate_sha256),
+        "duplicate_phash_count": len(duplicate_phash),
+        "invalid_files": invalid_files,
+        "invalid_hashes": invalid_hashes,
+        "evidence_status": "measured" if is_leak_free else "invalid",
     }
 
     if output_report_path:
@@ -116,8 +159,13 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
     LOGGER.info("  - Classes: %s", dict(class_distribution["total"]))
 
     if not is_leak_free:
-        LOGGER.error("CRITICAL: Data leakage detected in sessions: %s", leaked_sessions)
-        sys.exit(1)
+        LOGGER.error(
+            "Manifest không hợp lệ: leaked_sessions=%s, invalid_files=%s, invalid_hashes=%s",
+            leaked_sessions,
+            invalid_files,
+            invalid_hashes,
+        )
+        raise ValueError("Dataset audit thất bại; không được phát hành report benchmark.")
 
     return report
 
@@ -126,13 +174,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Audit dataset split manifest for leakage and invariants")
     parser.add_argument(
         "--manifest",
-        default="training/split_manifest.csv",
-        help="Path to split_manifest.csv",
+        default="data/manifests/dataset.csv",
+        help="Manifest được build từ metadata thật",
     )
     parser.add_argument(
         "--output",
-        default="training/dataset_report.json",
-        help="Path to output dataset_report.json",
+        default="reports/dataset_audit.json",
+        help="Nơi ghi report audit",
     )
     args = parser.parse_args()
     audit_dataset(Path(args.manifest), Path(args.output))

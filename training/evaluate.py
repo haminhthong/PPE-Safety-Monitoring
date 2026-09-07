@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument("--person-model", default="models/yolov8n.pt", help="Đường dẫn file trọng số Person")
     parser.add_argument("--data", default="training/data.yaml", help="File cấu hình dataset YAML")
     parser.add_argument("--split", default="test", help="Tập dữ liệu đánh giá (val hoặc test)")
-    parser.add_argument("--demo", action="store_true", default=True, help="Chạy benchmark mô phỏng khi chưa có weights")
+    parser.add_argument("--demo", action="store_true", help="Ghi metadata demo; không tạo benchmark giả")
     parser.add_argument(
         "--output", default="runs/eval_results.json", help="File lưu kết quả báo cáo JSON"
     )
@@ -53,12 +53,14 @@ def main() -> None:
     if args.layer == "detector":
         report = {
             "layer_1_ppe_detector": evaluate_ppe_detector(args.model, args.data, args.split, demo=args.demo),
-            "layer_2_person_detector": evaluate_person_detector(args.person_model, args.split, demo=args.demo),
+            "layer_2_person_detector": evaluate_person_detector(
+                args.person_model, args.split, demo=args.demo, data_config=args.data
+            ),
         }
     elif args.layer == "tracking":
-        report = evaluate_tracking_trajectories([], [])
+        parser.error("Tầng tracking cần được gọi bằng training/evaluate_tracking.py với GT và prediction.")
     elif args.layer == "events":
-        report = evaluate_violation_events([], [])
+        parser.error("Tầng events cần được gọi bằng training/evaluate_events.py với GT và prediction.")
     else:
         report = run_full_system_evaluation(demo=args.demo)
 

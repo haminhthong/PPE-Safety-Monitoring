@@ -10,6 +10,15 @@ Cung cấp các dataclass đại diện cho từng đối tượng phát hiện:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
+
+
+class PPEState(str, Enum):
+    """Trạng thái tri-state của một loại PPE."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
 
 
 @dataclass(slots=True)
@@ -31,23 +40,36 @@ class PPEDetection:
 class PPEStatus:
     """Trạng thái tổng hợp trang bị bảo hộ của một người.
 
-    Attributes:
-        detections: Danh sách các trang bị bảo hộ được tìm thấy (đã qua lọc không gian).
-        helmet_violation: Cờ báo vi phạm không đội mũ bảo hộ.
-        vest_violation: Cờ báo vi phạm không mặc áo phản quang.
-        helmet_score: Điểm tin cậy cao nhất của lớp mũ (tuân thủ).
-        no_helmet_score: Điểm tin cậy cao nhất của lớp không mũ (vi phạm).
-        vest_score: Điểm tin cậy cao nhất của lớp áo (tuân thủ).
-        no_vest_score: Điểm tin cậy cao nhất của lớp không áo (vi phạm).
+    UNKNOWN được dùng khi detector không có đủ bằng chứng. Nó không được
+    tự động suy ra là tuân thủ.
     """
 
     detections: list[PPEDetection] = field(default_factory=list)
-    helmet_violation: bool = False
-    vest_violation: bool = False
+    helmet_state: PPEState = PPEState.UNKNOWN
+    vest_state: PPEState = PPEState.UNKNOWN
     helmet_score: float = 0.0
     no_helmet_score: float = 0.0
     vest_score: float = 0.0
     no_vest_score: float = 0.0
+    helmet_evidence: list[PPEDetection] = field(default_factory=list)
+    vest_evidence: list[PPEDetection] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Chuẩn hóa state khi dữ liệu đến từ JSON hoặc caller cũ."""
+        if isinstance(self.helmet_state, str):
+            self.helmet_state = PPEState(self.helmet_state.lower())
+        if isinstance(self.vest_state, str):
+            self.vest_state = PPEState(self.vest_state.lower())
+
+    @property
+    def helmet_violation(self) -> bool:
+        """Tương thích ngược; trạng thái UNKNOWN vẫn được giữ nguyên."""
+        return self.helmet_state is PPEState.ABSENT
+
+    @property
+    def vest_violation(self) -> bool:
+        """Tương thích ngược; trạng thái UNKNOWN vẫn được giữ nguyên."""
+        return self.vest_state is PPEState.ABSENT
 
 
 @dataclass(slots=True)
@@ -84,3 +106,6 @@ class ViolationState:
     last_seen_sec: float = 0.0
     event_count: int = 0
     resolved_at_sec: float | None = None
+    violation_started_at_sec: float | None = None
+    compliance_started_at_sec: float | None = None
+    last_alert_at_sec: float | None = None

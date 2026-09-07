@@ -1,5 +1,5 @@
-# Inference Contract & Decision Policy
-# Specifies detection thresholds, tracking parameters, spatial body-zone boundaries, and temporal confirmation FSM rules.
+# Runtime policy duy nhất của pipeline online.
+# Mọi report phải lưu lại bản cấu hình đã resolve từ file này.
 
 inference_contract:
   person_confidence: 0.30
@@ -7,27 +7,32 @@ inference_contract:
   nms_iou: 0.50
   image_size: 640
   person_roi_padding_px: 10
+  person_detection_interval: 1       # Detect người/tracking mỗi frame
+  ppe_detection_interval: 4          # PPE inspection mỗi N observation của track
 
 tracking_policy:
-  tracker_type: "bytetrack"              # 'bytetrack' or 'iou'
-  high_threshold: 0.50                   # High detection threshold for stage-1 matching
-  match_threshold: 0.70                  # IoU match threshold for tracking
-  max_missed_detections: 30              # Max missed detector observation cycles before track deletion
-  track_ttl_seconds: 5.0                 # Alternative time-based track lifetime
+  tracker_type: "two_threshold_iou"       # Baseline nội bộ; không gọi là ByteTrack chuẩn
+  high_threshold: 0.50                   # Ngưỡng detection cao cho ghép cặp giai đoạn 1
+  match_threshold: 0.70                  # Ngưỡng IoU ghép cặp tracking
+  low_match_threshold: 0.30
+  max_missed_detections: 30              # Số chu kỳ detector bỏ lỡ trước khi xóa track
+  track_ttl_seconds: 5.0                 # TTL của track theo thời gian
 
 spatial_association_policy:
   enable_body_zone_filter: true
   head_zone:
     y_min_ratio: 0.00
-    y_max_ratio: 0.35                    # Helmet / no-helmet must overlap upper 35% of person ROI
+    y_max_ratio: 0.35                    # Helmet/no-helmet ở 35% phía trên person ROI
   torso_zone:
     y_min_ratio: 0.30
-    y_max_ratio: 0.75                    # Vest / no-vest must overlap 30%-75% of person ROI
+    y_max_ratio: 0.75                    # Vest/no-vest ở vùng 30%-75% của person ROI
 
 decision_policy:
-  conflict_margin: 0.10                  # Confidence difference needed to resolve conflicting labels
-  violation_confirmations: 3             # Consecutive detection observations required to emit alert
-  resolution_confirmations: 3            # Consecutive compliant observations required to resolve alert
-  alert_cooldown_seconds: 10.0           # Cooldown before recurring alerts for same track
-  roi_rule: "center_or_overlap"          # 'center' or 'overlap'
+  conflict_margin: 0.10                  # Chênh lệch confidence để giải quyết nhãn xung đột
+  violation_confirmations: 3             # Chỉ compatibility cho API cũ
+  resolution_confirmations: 3            # Chỉ compatibility cho API cũ
+  violation_confirm_seconds: 0.50        # Dwell time xác nhận vi phạm
+  resolution_confirm_seconds: 1.00       # Dwell time xác nhận khắc phục
+  alert_cooldown_seconds: 10.0           # Thời gian chờ trước cảnh báo tái phạm cùng track
+  roi_rule: "center_or_overlap"          # 'center', 'overlap' hoặc kết hợp cả hai
   roi_overlap_threshold: 0.40

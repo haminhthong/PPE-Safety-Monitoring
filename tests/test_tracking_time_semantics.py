@@ -1,14 +1,16 @@
-"""Tests kiểm tra thuật toán ByteTrack và ngữ nghĩa thời gian (Detection Cycles & Motion Prediction)."""
+"""Kiểm thử tracker IoU hai ngưỡng và ngữ nghĩa thời gian."""
 
 from __future__ import annotations
 
 from ppe_detection.models import PersonDetection
-from ppe_detection.tracker import ByteTrack
+from ppe_detection.tracker import TwoThresholdIoUTracker
 
 
-def test_bytetrack_two_stage_association() -> None:
-    """ByteTrack phục hồi được track người bị che khuất một phần nhờ nhóm Low-Confidence Detections."""
-    tracker = ByteTrack(high_threshold=0.6, match_threshold=0.5, low_match_threshold=0.3)
+def test_two_threshold_tracker_association() -> None:
+    """Tracker phục hồi track qua detection confidence thấp ở giai đoạn hai."""
+    tracker = TwoThresholdIoUTracker(
+        high_threshold=0.6, match_threshold=0.5, low_match_threshold=0.3
+    )
 
     # Frame 1: Người 1 rõ nét (conf 0.90) -> Khởi tạo track ID 1
     det_clear = [PersonDetection(box=[100.0, 100.0, 150.0, 250.0], confidence=0.90)]
@@ -16,17 +18,16 @@ def test_bytetrack_two_stage_association() -> None:
     assert len(tracks1) == 1
     assert tracks1[0].track_id == 1
 
-    # Frame 2: Người 1 bị xe cẩu che khuất 1 phần, confidence giảm xuống 0.45 (nhỏ hơn high_threshold 0.6)
-    # Thuật toán IoU thông thường sẽ bỏ qua và sinh ID mới, nhưng ByteTrack ghép cặp ở Stage 2!
+    # Frame 2: Người 1 bị che khuất một phần, confidence giảm dưới high_threshold.
     det_occluded = [PersonDetection(box=[105.0, 102.0, 155.0, 252.0], confidence=0.45)]
     tracks2 = tracker.update(det_occluded)
     assert len(tracks2) == 1
-    assert tracks2[0].track_id == 1, "ByteTrack phải duy trì đúng ID 1 qua Low-Confidence Stage 2!"
+    assert tracks2[0].track_id == 1, "Tracker phải duy trì ID qua giai đoạn confidence thấp."
 
 
 def test_motion_prediction_prevents_box_freeze() -> None:
     """Khi không chạy detector, tracker predict() phải nội suy di chuyển theo vận tốc, không đứng yên."""
-    tracker = ByteTrack()
+    tracker = TwoThresholdIoUTracker()
 
     # Frame 1
     tracker.update([PersonDetection(box=[100.0, 100.0, 150.0, 200.0], confidence=0.9)])
@@ -42,7 +43,7 @@ def test_motion_prediction_prevents_box_freeze() -> None:
 
 def test_max_missed_detections_semantics() -> None:
     """Xác nhận max_missed_detections tính theo chu kỳ detector (update cycles), không xóa track quá sớm."""
-    tracker = ByteTrack(max_missed_detections=3)
+    tracker = TwoThresholdIoUTracker(max_missed_detections=3)
 
     tracker.update([PersonDetection(box=[10.0, 10.0, 50.0, 80.0], confidence=0.9)])
     assert len(tracker.active_tracks()) == 1

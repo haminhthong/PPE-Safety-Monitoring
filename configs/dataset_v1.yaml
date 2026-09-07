@@ -25,8 +25,6 @@ crop_strategy:
 split_protocol:
   strategy: "group_aware_split"
   group_keys:
-    - camera_id
-    - location_id
     - recording_session
   ratios:
     train: 0.70
@@ -34,5 +32,5 @@ split_protocol:
     test: 0.15
   anti_leakage_rules:
     - "No recording session may span multiple splits."
-    - "Deduplication enforced via exact SHA-256 and perceptual pHash (Hamming distance threshold = 5)."
-    - "Test split includes dedicated unseen camera angles (cam_04, cam_05) for domain-shift validation."
+    - "Exact SHA-256 is rejected; perceptual pHash is recorded for near-duplicate audit."
+    - "Ưu tiên test split có camera/góc nhìn chưa xuất hiện trong train khi dữ liệu đáp ứng điều kiện."

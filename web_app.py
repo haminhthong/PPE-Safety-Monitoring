@@ -88,6 +88,13 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
+    policy_path = Path(__file__).resolve().parent / "configs" / "runtime_policy.yaml"
+    try:
+        policy_defaults = DetectionConfig.load_from_policy(policy_path, demo_mode=True)
+    except (FileNotFoundError, ValueError) as error:
+        st.error(f"Runtime policy không hợp lệ: {error}")
+        return
+
     col_m1, col_m2 = st.sidebar.columns(2)
     with col_m1:
         person_model_str = st.text_input(
@@ -97,10 +104,32 @@ def main() -> None:
         ppe_model_str = st.text_input("Model PPE", value="models/best.pt", disabled=demo_mode)
 
     st.sidebar.subheader("🎛️ Ngưỡng Phát Hiện")
-    person_conf = st.sidebar.slider("Confidence Người", 0.1, 1.0, 0.3, 0.05)
-    ppe_conf = st.sidebar.slider("Confidence PPE", 0.1, 1.0, 0.3, 0.05)
-    confirm_frames = st.sidebar.slider("Khung hình xác nhận vi phạm", 1, 10, 2)
-    detect_interval = st.sidebar.slider("Chạy detection sau N frame", 1, 10, 4)
+    person_conf = st.sidebar.slider(
+        "Confidence Người", 0.1, 1.0, float(policy_defaults.person_confidence), 0.05
+    )
+    ppe_conf = st.sidebar.slider(
+        "Confidence PPE", 0.1, 1.0, float(policy_defaults.ppe_confidence), 0.05
+    )
+    person_detection_interval = st.sidebar.slider(
+        "Chu kỳ detect người", 1, 10, policy_defaults.detection_interval
+    )
+    ppe_detection_interval = st.sidebar.slider(
+        "Chu kỳ inspect PPE", 1, 10, policy_defaults.ppe_detection_interval
+    )
+    confirm_seconds = st.sidebar.slider(
+        "Thời gian xác nhận vi phạm (giây)",
+        0.0,
+        10.0,
+        float(policy_defaults.violation_confirm_seconds),
+        0.1,
+    )
+    resolve_seconds = st.sidebar.slider(
+        "Thời gian xác nhận khắc phục (giây)",
+        0.0,
+        10.0,
+        float(policy_defaults.resolution_confirm_seconds),
+        0.1,
+    )
 
     save_snapshots = st.sidebar.checkbox("📸 Lưu bằng chứng vi phạm (Snapshots)", value=True)
 
@@ -131,13 +160,16 @@ def main() -> None:
     person_path = Path(person_model_str) if not demo_mode and person_model_str else None
     ppe_path = Path(ppe_model_str) if not demo_mode and ppe_model_str else None
 
-    config = DetectionConfig(
+    config = DetectionConfig.load_from_policy(
+        policy_path,
         person_model_path=person_path,
         ppe_model_path=ppe_path,
         person_confidence=person_conf,
         ppe_confidence=ppe_conf,
-        violation_confirmations=confirm_frames,
-        detection_interval=detect_interval,
+        detection_interval=person_detection_interval,
+        ppe_detection_interval=ppe_detection_interval,
+        violation_confirm_seconds=confirm_seconds,
+        resolution_confirm_seconds=resolve_seconds,
         show_window=False,
         save_output=True,
         save_snapshots=save_snapshots,
