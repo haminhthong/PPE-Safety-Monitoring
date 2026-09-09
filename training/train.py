@@ -1,4 +1,4 @@
-"""Script huấn luyện mô hình YOLO PPE với theo dõi metadata thí nghiệm và hợp đồng huấn luyện đầy đủ."""
+"""Huấn luyện YOLO PPE và ghi metadata thí nghiệm."""
 
 from __future__ import annotations
 
@@ -26,12 +26,14 @@ def get_git_commit() -> str:
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
         )
         return res.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
-def record_environment_metadata(config_path: Path, output_dir: Path, resolved_cfg: dict[str, Any]) -> dict[str, Any]:
-    """Ghi lại metadata đầy đủ của môi trường phần cứng, thư viện và cấu hình huấn luyện đã giải quyết."""
+def record_environment_metadata(
+    config_path: Path, output_dir: Path, resolved_cfg: dict[str, Any]
+) -> dict[str, Any]:
+    """Ghi metadata môi trường và cấu hình huấn luyện đã giải quyết."""
     import ultralytics
 
     metadata = {
@@ -81,7 +83,16 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
     # Chuyển tiếp các siêu tham số tối ưu hóa nếu được cấu hình
-    for opt_param in ("optimizer", "lr0", "lrf", "momentum", "weight_decay", "warmup_epochs", "warmup_momentum", "warmup_bias_lr"):
+    for opt_param in (
+        "optimizer",
+        "lr0",
+        "lrf",
+        "momentum",
+        "weight_decay",
+        "warmup_epochs",
+        "warmup_momentum",
+        "warmup_bias_lr",
+    ):
         if opt_param in cfg:
             train_kwargs[opt_param] = cfg[opt_param]
 
@@ -118,7 +129,11 @@ def train_model(config_file: str) -> None:
     model = YOLO(model_type)
 
     train_kwargs = build_train_kwargs(cfg)
-    LOGGER.info("Bắt đầu huấn luyện mô hình [%s] trong %d epochs với tham số đã ánh xạ:", exp_name, train_kwargs["epochs"])
+    LOGGER.info(
+        "Bắt đầu huấn luyện mô hình [%s] trong %d epochs với tham số đã ánh xạ:",
+        exp_name,
+        train_kwargs["epochs"],
+    )
     for k, v in train_kwargs.items():
         LOGGER.info("  - %s: %s", k, v)
 

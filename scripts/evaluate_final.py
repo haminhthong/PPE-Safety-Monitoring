@@ -24,7 +24,7 @@ def load_json(path: str) -> list[dict[str, Any]]:
     return value
 
 
-def load_id_map(path: str | None) -> dict[int, int] | None:
+def load_id_map(path: str | None) -> dict[str, str] | None:
     """Đọc ánh xạ ID sau khi đối chiếu trajectory GT và prediction."""
     if not path:
         return None
@@ -34,19 +34,22 @@ def load_id_map(path: str | None) -> dict[int, int] | None:
     value = json.loads(file.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"Identity map phải là JSON object: {file}")
-    return {int(key): int(mapped) for key, mapped in value.items()}
+    return {str(key): str(mapped) for key, mapped in value.items()}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá PPE locked test thật")
     parser.add_argument("--ppe-model", required=True)
     parser.add_argument("--person-model", required=True)
-    parser.add_argument("--data", required=True)
+    parser.add_argument("--ppe-data", required=True)
+    parser.add_argument("--person-data", required=True)
     parser.add_argument("--gt-tracks", required=True)
     parser.add_argument("--pred-tracks", required=True)
     parser.add_argument("--gt-events", required=True)
     parser.add_argument("--pred-events", required=True)
-    parser.add_argument("--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID")
+    parser.add_argument(
+        "--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID"
+    )
     parser.add_argument("--duration-hours", required=True, type=float)
     parser.add_argument("--output", default="reports/locked_test_metrics.json")
     args = parser.parse_args()
@@ -54,7 +57,8 @@ def main() -> None:
     report = run_full_system_evaluation(
         ppe_model=args.ppe_model,
         person_model=args.person_model,
-        data_config=args.data,
+        ppe_data_config=args.ppe_data,
+        person_data_config=args.person_data,
         gt_tracks=load_json(args.gt_tracks),
         pred_tracks=load_json(args.pred_tracks),
         gt_events=load_json(args.gt_events),

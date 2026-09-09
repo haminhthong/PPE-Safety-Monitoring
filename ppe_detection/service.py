@@ -45,7 +45,8 @@ class DetectionService:
         """
         if self.config.demo_mode:
             LOGGER.warning(
-                "[DEMO MODE ACTIVE]: Kết quả đang được mô phỏng bởi SyntheticDemoDetector, không phải inference AI thật."
+                "[DEMO MODE ACTIVE]: Kết quả mô phỏng bởi SyntheticDemoDetector, "
+                "không phải inference AI thật."
             )
 
         if self.config.save_output:

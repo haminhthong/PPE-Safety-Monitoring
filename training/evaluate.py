@@ -16,14 +16,10 @@ from pathlib import Path
 
 try:
     from .evaluate_detector import evaluate_person_detector, evaluate_ppe_detector
-    from .evaluate_events import evaluate_violation_events
     from .evaluate_system import run_full_system_evaluation
-    from .evaluate_tracking import evaluate_tracking_trajectories
 except (ImportError, ValueError):
     from evaluate_detector import evaluate_person_detector, evaluate_ppe_detector
-    from evaluate_events import evaluate_violation_events
     from evaluate_system import run_full_system_evaluation
-    from evaluate_tracking import evaluate_tracking_trajectories
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("evaluate")
@@ -37,11 +33,22 @@ def main() -> None:
         default="system",
         help="Tầng đánh giá cần thực thi (detector, tracking, events, system)",
     )
-    parser.add_argument("--model", default="models/best.pt", help="Đường dẫn file trọng số model PPE")
-    parser.add_argument("--person-model", default="models/yolov8n.pt", help="Đường dẫn file trọng số Person")
-    parser.add_argument("--data", default="training/data.yaml", help="File cấu hình dataset YAML")
+    parser.add_argument(
+        "--model", default="models/best.pt", help="Đường dẫn file trọng số model PPE"
+    )
+    parser.add_argument(
+        "--person-model", default="models/yolov8n.pt", help="Đường dẫn file trọng số Person"
+    )
+    parser.add_argument(
+        "--ppe-data", default="training/data.yaml", help="Dataset config cho PPE person-crop"
+    )
+    parser.add_argument(
+        "--person-data", required=False, help="Dataset config full-frame có class person"
+    )
     parser.add_argument("--split", default="test", help="Tập dữ liệu đánh giá (val hoặc test)")
-    parser.add_argument("--demo", action="store_true", help="Ghi metadata demo; không tạo benchmark giả")
+    parser.add_argument(
+        "--demo", action="store_true", help="Ghi metadata demo; không tạo benchmark giả"
+    )
     parser.add_argument(
         "--output", default="runs/eval_results.json", help="File lưu kết quả báo cáo JSON"
     )
@@ -52,15 +59,24 @@ def main() -> None:
 
     if args.layer == "detector":
         report = {
-            "layer_1_ppe_detector": evaluate_ppe_detector(args.model, args.data, args.split, demo=args.demo),
+            "layer_1_ppe_detector": evaluate_ppe_detector(
+                args.model, args.ppe_data, args.split, demo=args.demo
+            ),
             "layer_2_person_detector": evaluate_person_detector(
-                args.person_model, args.split, demo=args.demo, data_config=args.data
+                args.person_model,
+                args.split,
+                demo=args.demo,
+                person_data_config=args.person_data,
             ),
         }
     elif args.layer == "tracking":
-        parser.error("Tầng tracking cần được gọi bằng training/evaluate_tracking.py với GT và prediction.")
+        parser.error(
+            "Tầng tracking cần được gọi bằng training/evaluate_tracking.py với GT và prediction."
+        )
     elif args.layer == "events":
-        parser.error("Tầng events cần được gọi bằng training/evaluate_events.py với GT và prediction.")
+        parser.error(
+            "Tầng events cần được gọi bằng training/evaluate_events.py với GT và prediction."
+        )
     else:
         report = run_full_system_evaluation(demo=args.demo)
 

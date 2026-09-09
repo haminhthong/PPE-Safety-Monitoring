@@ -57,8 +57,12 @@ def draw_tracks(
     # 2. Vẽ thông tin từng đối tượng người
     for track in tracks:
         x1, y1, x2, y2 = map(int, track.box)
-        has_violation = track.ppe.helmet_state is PPEState.ABSENT or track.ppe.vest_state is PPEState.ABSENT
-        has_unknown = track.ppe.helmet_state is PPEState.UNKNOWN or track.ppe.vest_state is PPEState.UNKNOWN
+        has_violation = (
+            track.ppe.helmet_state is PPEState.ABSENT or track.ppe.vest_state is PPEState.ABSENT
+        )
+        has_unknown = (
+            track.ppe.helmet_state is PPEState.UNKNOWN or track.ppe.vest_state is PPEState.UNKNOWN
+        )
 
         # Đỏ = vi phạm, cam = chưa đủ bằng chứng, xanh = tuân thủ.
         color = (0, 0, 255) if has_violation else (0, 165, 255) if has_unknown else (0, 200, 0)

@@ -10,6 +10,7 @@ outputs/
 .pytest_cache/
 .ruff_cache/
 pytest_temp/
+.coverage
+coverage.xml
 .idea/
 .vscode/
-

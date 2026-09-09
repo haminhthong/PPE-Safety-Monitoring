@@ -28,7 +28,7 @@ class PPEDetection:
     Attributes:
         label: Tên nhãn lớp PPE ('helmet', 'no-helmet', 'vest', 'no-vest').
         confidence: Độ tin cậy dự đoán từ mô hình (từ 0.0 đến 1.0).
-        box: Tọa độ bounding box [x1, y1, x2, y2] tính theo pixel trong vùng crop hoặc chuẩn hóa [0..1].
+        box: Tọa độ [x1, y1, x2, y2] trong crop hoặc chuẩn hóa [0..1].
     """
 
     label: str
@@ -89,11 +89,11 @@ class PersonDetection:
 
 @dataclass
 class ViolationState:
-    """Trạng thái máy hữu hạn (Temporal Violation FSM) cho từng cá nhân theo loại vi phạm.
+    """Trạng thái máy hữu hạn theo thời gian cho từng cá nhân và loại vi phạm.
 
     Trạng thái:
         - COMPLIANT: Tuân thủ đầy đủ bảo hộ.
-        - VIOLATING: Xuất hiện dấu hiệu vi phạm nhưng đang trong giai đoạn tích lũy quan sát xác nhận.
+        - VIOLATING: Dấu hiệu vi phạm đang chờ đủ bằng chứng xác nhận.
         - ALERTED: Đã xác nhận vi phạm chính thức và phát cảnh báo/lưu snapshot.
         - RESOLVED: Người đã khắc phục vi phạm (ví dụ đã đội lại mũ).
     """

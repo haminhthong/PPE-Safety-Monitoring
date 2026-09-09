@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ def evaluate_violation_events(
     events_pred: list[dict[str, Any]],
     duration_hours: float = 1.0,
     time_tolerance_sec: float = 3.0,
-    gt_to_pred_map: dict[int, int] | None = None,
+    gt_to_pred_map: dict[object, object] | None = None,
 ) -> dict[str, Any]:
     """Đánh giá event interval sau khi identity đã được map từ tracking.
 
@@ -35,8 +36,10 @@ def evaluate_violation_events(
     như point event để tương thích dữ liệu cũ. Không có mapping thì chỉ các
     ID trùng nhau mới được ghép, tuyệt đối không bỏ qua identity check.
     """
-    if duration_hours <= 0:
+    if duration_hours <= 0 or not math.isfinite(duration_hours):
         raise ValueError("duration_hours phải lớn hơn 0.")
+    if time_tolerance_sec < 0 or not math.isfinite(time_tolerance_sec):
+        raise ValueError("time_tolerance_sec không được âm và phải hữu hạn.")
     tp = 0
     fp = 0
     matched_gt: set[int] = set()
@@ -47,12 +50,14 @@ def evaluate_violation_events(
             event.get("start_sec", event.get("event_start_seconds", event.get("time_seconds", 0.0)))
         )
         end = float(event.get("end_sec", event.get("event_end_seconds", start)))
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0.0:
+            raise ValueError(f"Event có timestamp không hợp lệ: {event}")
         if end < start:
             raise ValueError(f"Event có end trước start: {event}")
         return start, end
 
     def alert_time(event: dict[str, Any]) -> float:
-        return float(
+        value = float(
             event.get(
                 "alert_time_sec",
                 event.get(
@@ -67,13 +72,31 @@ def evaluate_violation_events(
                 ),
             )
         )
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"Event có alert time không hợp lệ: {event}")
+        return value
+
+    def event_type(event: dict[str, Any]) -> str:
+        value = str(event.get("violation_type", "")).strip().lower()
+        if value not in {"helmet", "vest"}:
+            raise ValueError(f"Event thiếu violation_type hợp lệ: {event}")
+        return value
+
+    for event in [*events_gt, *events_pred]:
+        if not isinstance(event, dict) or event.get("track_id") is None:
+            raise ValueError(f"Event phải có track_id: {event}")
+        event_type(event)
+        interval(event)
+        alert_time(event)
+
+    identity_map = {str(key): str(value) for key, value in (gt_to_pred_map or {}).items()}
 
     preds_sorted = sorted(events_pred, key=alert_time)
     gts_sorted = sorted(events_gt, key=lambda x: interval(x)[0])
 
     for pred in preds_sorted:
-        p_track = pred.get("track_id")
-        p_type = pred.get("violation_type", "").lower()
+        p_track = str(pred["track_id"])
+        p_type = event_type(pred)
 
         matched_idx = None
         min_time_diff = float("inf")
@@ -82,21 +105,21 @@ def evaluate_violation_events(
             if idx in matched_gt:
                 continue
 
-            g_track = gt.get("track_id")
-            g_type = gt.get("violation_type", "").lower()
+            g_track = gt["track_id"]
+            g_type = event_type(gt)
             g_start, g_end = interval(gt)
 
             # Kiểm tra loại vi phạm
             if p_type != g_type:
                 continue
 
-            expected_pred_track = gt_to_pred_map.get(g_track) if gt_to_pred_map else g_track
+            expected_pred_track = identity_map.get(str(g_track), str(g_track))
             if expected_pred_track != p_track:
                 continue
 
             p_time = alert_time(pred)
-            if g_start - time_tolerance_sec <= p_time <= g_end + time_tolerance_sec:
-                dt = max(0.0, p_time - g_start)
+            if g_start <= p_time <= g_end + time_tolerance_sec:
+                dt = p_time - g_start
                 if dt < min_time_diff:
                     min_time_diff = dt
                     matched_idx = idx
@@ -122,14 +145,14 @@ def evaluate_violation_events(
             else (ordered_tta[middle - 1] + ordered_tta[middle]) / 2.0
         )
     else:
-        median_tta = 0.0
+        median_tta = None
 
     return {
         "event_precision": round(precision, 4),
         "event_recall": round(recall, 4),
         "event_f1": round(f1, 4),
         "false_alerts_per_hour": round(far_per_hour, 2),
-        "median_time_to_alert_sec": round(median_tta, 2),
+        "median_time_to_alert_sec": round(median_tta, 2) if median_tta is not None else None,
         "true_positives": tp,
         "false_positives": fp,
         "false_negatives": fn,
@@ -144,7 +167,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá Layer 4: Violation Events")
     parser.add_argument("--gt-events", default="", help="File JSON danh sách sự kiện Ground Truth")
     parser.add_argument("--pred-events", default="", help="File JSON danh sách sự kiện Predicted")
-    parser.add_argument("--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID")
+    parser.add_argument(
+        "--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID"
+    )
     parser.add_argument("--duration-hours", type=float, default=1.0, help="Thời lượng video (giờ)")
     parser.add_argument("--tolerance", type=float, default=3.0, help="Dung sai thời gian (giây)")
     parser.add_argument("--output", default="runs/eval_events.json", help="File lưu báo cáo JSON")
@@ -166,7 +191,7 @@ def main() -> None:
         raw_map = json.loads(map_path.read_text(encoding="utf-8"))
         if not isinstance(raw_map, dict):
             parser.error("Identity map phải là JSON object.")
-        id_map = {int(key): int(value) for key, value in raw_map.items()}
+        id_map = {key: value for key, value in raw_map.items()}
 
     metrics = evaluate_violation_events(
         gt_events,

@@ -28,7 +28,7 @@ class DetectionConfig:
         nms_iou: Ngưỡng IoU cho Non-Maximum Suppression của YOLO.
         tracker_type: Thuật toán tracking ('two_threshold_iou' hoặc 'iou').
         tracker_iou: Ngưỡng IoU tối thiểu để ghép cặp vết theo dõi.
-        max_disappeared: Số chu kỳ detector tối đa giữ lại track khi đối tượng mất dấu (alias của max_missed_detections).
+        max_disappeared: Số chu kỳ detector tối đa giữ lại track khi mất dấu.
         max_missed_detections: Số chu kỳ detector bỏ lỡ tối đa trước khi xóa ID khỏi bộ nhớ.
         violation_confirm_seconds: Dwell time xác nhận vi phạm.
         resolution_confirm_seconds: Dwell time xác nhận khắc phục.
@@ -113,7 +113,11 @@ class DetectionConfig:
                     f"Không tìm thấy model phát hiện PPE: {self.ppe_model_path}"
                 )
 
-        if self.image_size <= 0 or self.detection_interval <= 0 or self.ppe_detection_interval <= 0:
+        if (
+            self.image_size <= 0
+            or self.detection_interval <= 0
+            or self.ppe_detection_interval <= 0
+        ):
             raise ValueError("image_size và các chu kỳ inference phải lớn hơn 0.")
 
         if self.violation_confirmations <= 0:
@@ -160,6 +164,12 @@ class DetectionConfig:
             raise ValueError("roi_rule phải là center, overlap hoặc center_or_overlap.")
         if self.tracker_type.lower() not in {"two_threshold_iou", "iou", "bytetrack"}:
             raise ValueError("tracker_type không được hỗ trợ.")
+        if self.roi_polygon is not None:
+            if self.roi_polygon and len(self.roi_polygon) < 3:
+                raise ValueError("roi_polygon phải có ít nhất 3 đỉnh.")
+            for point in self.roi_polygon:
+                if len(point) != 2:
+                    raise ValueError("Mỗi điểm roi_polygon phải có dạng (x, y).")
 
     def to_dict(self) -> dict[str, Any]:
         """Chuyển cấu hình đã giải quyết thành dữ liệu có thể ghi JSON."""
@@ -203,6 +213,21 @@ class DetectionConfig:
         torso = spatial.get("torso_zone", {})
         if not isinstance(head, dict) or not isinstance(torso, dict):
             raise ValueError("head_zone và torso_zone phải là object.")
+        roi_polygon_raw = decision.get("roi_polygon", spatial.get("roi_polygon"))
+        roi_polygon = None
+        if roi_polygon_raw is not None:
+            if not isinstance(roi_polygon_raw, list):
+                raise ValueError("roi_polygon phải là danh sách các điểm.")
+            try:
+                roi_polygon = [
+                    (int(point[0]), int(point[1]))
+                    for point in roi_polygon_raw
+                    if isinstance(point, list | tuple) and len(point) == 2
+                ]
+            except (TypeError, ValueError, IndexError) as error:
+                raise ValueError("roi_polygon phải chứa các điểm [x, y] hợp lệ.") from error
+            if len(roi_polygon) != len(roi_polygon_raw):
+                raise ValueError("roi_polygon phải chứa các điểm [x, y] hợp lệ.")
 
         kwargs: dict[str, Any] = {
             "image_size": inference.get("image_size", 640),
@@ -231,6 +256,7 @@ class DetectionConfig:
             "alert_cooldown_seconds": decision.get("alert_cooldown_seconds", 10.0),
             "roi_rule": decision.get("roi_rule", "center_or_overlap"),
             "roi_overlap_threshold": decision.get("roi_overlap_threshold", 0.4),
+            "roi_polygon": roi_polygon,
             "policy_path": policy_path,
         }
         kwargs.update(overrides)

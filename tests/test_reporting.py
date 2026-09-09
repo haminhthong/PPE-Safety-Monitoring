@@ -24,7 +24,7 @@ def test_session_report_counts_and_events():
 
 def test_session_report_save_files(tmp_path: Path):
     """Kiểm tra việc lưu file báo cáo JSON và CSV."""
-    report = SessionReport(source="0")
+    report = SessionReport(source="0", resolved_config={"demo_mode": True})
     report.total_frames = 100
     report.unique_track_ids.add(1)
     report.add_event(track_id=1, kind="helmet", frame_id=15, fps=30.0)
@@ -36,6 +36,7 @@ def test_session_report_save_files(tmp_path: Path):
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["total_frames"] == 100
+    assert payload["synthetic_demo"] is True
     assert payload["unique_people_tracked"] == 1
     assert len(payload["events"]) == 1
     assert payload["events"][0]["violation_type"] == "helmet"

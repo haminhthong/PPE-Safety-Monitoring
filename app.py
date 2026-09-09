@@ -8,10 +8,12 @@ Ví dụ sử dụng:
        python app.py --demo
 
     2. Chạy với Webcam và lưu báo cáo kết quả:
-       python app.py --source 0 --person-model models/yolov8n.pt --ppe-model models/best.pt --save
+       python app.py --source 0 --person-model models/yolov8n.pt \\
+       --ppe-model models/best.pt --save
 
     3. Chạy xử lý file Video:
-       python app.py --source data/test.mp4 --person-model models/yolov8n.pt --ppe-model models/best.pt --save
+       python app.py --source data/test.mp4 --person-model models/yolov8n.pt \\
+       --ppe-model models/best.pt --save
 """
 
 from __future__ import annotations
@@ -85,10 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kích thước ảnh đầu vào cho YOLO inference (mặc định: 640)",
     )
     parser.add_argument(
-        "--detect-interval",
+        "--person-interval",
         type=int,
         default=None,
-        help="Override cadence PPE (chỉ dùng debug); tracking vẫn theo policy.",
+        help="Override chu kỳ phát hiện người (chỉ dùng debug).",
+    )
+    parser.add_argument(
+        "--ppe-interval",
+        "--detect-interval",
+        dest="ppe_detection_interval",
+        type=int,
+        default=None,
+        help="Override chu kỳ kiểm tra PPE (chỉ dùng debug). --detect-interval là alias cũ.",
     )
     parser.add_argument(
         "--person-conf",
@@ -101,12 +111,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Ngưỡng tin cậy tối thiểu cho phát hiện PPE (mặc định: 0.3)",
-    )
-    parser.add_argument(
-        "--confirm-frames",
-        type=int,
-        default=None,
-        help="Số lần phát hiện liên tiếp trước khi ghi nhận vi phạm chính thức (mặc định: 2)",
     )
     parser.add_argument(
         "--save",
@@ -154,7 +158,9 @@ def main() -> None:
         LOGGER.error(
             " CHƯA TRUYỀN MÔ HÌNH: Thiếu --person-model hoặc --ppe-model.\n"
             "   Để chạy chế độ mô phỏng pipeline thử nghiệm, vui lòng truyền cờ '--demo'.\n"
-            "   Hoặc truyền đường dẫn model thật: python app.py --person-model models/yolov8n.pt --ppe-model models/best.pt"
+            "   Hoặc truyền đường dẫn model thật: "
+            "python app.py --person-model models/yolov8n.pt "
+            "--ppe-model models/best.pt"
         )
         raise SystemExit(1)
 
@@ -183,16 +189,14 @@ def main() -> None:
     }
     if args.img_size is not None:
         overrides["image_size"] = args.img_size
-    if args.detect_interval is not None:
-        overrides["ppe_detection_interval"] = args.detect_interval
+    if args.person_interval is not None:
+        overrides["detection_interval"] = args.person_interval
+    if args.ppe_detection_interval is not None:
+        overrides["ppe_detection_interval"] = args.ppe_detection_interval
     if args.person_conf is not None:
         overrides["person_confidence"] = args.person_conf
     if args.ppe_conf is not None:
         overrides["ppe_confidence"] = args.ppe_conf
-    if args.confirm_frames is not None:
-        LOGGER.warning("--confirm-frames chỉ dành cho API cũ; production dùng dwell time trong policy.")
-        overrides["violation_confirmations"] = args.confirm_frames
-
     try:
         config = DetectionConfig.load_from_policy(Path(args.policy), **overrides)
     except (FileNotFoundError, ValueError) as error:

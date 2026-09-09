@@ -1,9 +1,9 @@
 """Kiểm toán manifest ảnh thật và giao thức chống rò rỉ.
 
 Kiểm tra:
-1. Tính toàn vẹn của chiến lược phân chia theo nhóm (Group-Aware Splitting): Không có session nào xuất hiện ở nhiều split.
+1. Kiểm tra chia nhóm; không có session xuất hiện ở nhiều split.
 2. Kiểm tra test có camera độc lập nếu protocol yêu cầu.
-3. Kiểm tra tính duy nhất của mã băm SHA-256 (không có ảnh trùng lặp).
+3. Kiểm tra mã băm SHA-256, không có ảnh trùng lặp.
 4. Thống kê phân phối nhãn chi tiết (helmet, no-helmet, vest, no-vest).
 5. Ghi trạng thái evidence; không tạo benchmark nếu audit thất bại.
 """
@@ -34,8 +34,16 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
         reader = csv.DictReader(file)
         rows = list(reader)
         required = {
-            "sample_id", "recording_session", "camera_id", "site_id", "split",
-            "image_path", "label_path", "class_labels", "file_sha256", "image_phash",
+            "sample_id",
+            "recording_session",
+            "camera_id",
+            "site_id",
+            "split",
+            "image_path",
+            "label_path",
+            "class_labels",
+            "file_sha256",
+            "image_phash",
         }
         missing = required - set(reader.fieldnames or [])
         if missing:
@@ -171,7 +179,9 @@ def audit_dataset(manifest_path: Path, output_report_path: Path | None = None) -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit dataset split manifest for leakage and invariants")
+    parser = argparse.ArgumentParser(
+        description="Audit dataset split manifest for leakage and invariants"
+    )
     parser.add_argument(
         "--manifest",
         default="data/manifests/dataset.csv",

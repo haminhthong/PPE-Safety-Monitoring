@@ -34,7 +34,7 @@ def test_is_center_in_roi_boundary_cases():
     # Tâm nằm ngoài ROI
     assert is_center_in_roi([150, 150, 200, 200], roi_polygon) is False
 
-    # Vùng ROI rỗng hoặc không đủ đỉnh (< 3) mặc định trả về True
+    # ROI rỗng hoặc không đủ đỉnh (< 3) mặc định trả về True.
     assert is_center_in_roi([150, 150, 200, 200], []) is True
     assert is_center_in_roi([150, 150, 200, 200], [(10, 10), (20, 20)]) is True
 
@@ -63,7 +63,7 @@ def test_ppe_label_conflict_resolution():
     )
     assert violation is True
 
-    # no-helmet score (0.65) không vượt qua helmet score (0.6) + 0.1 (chênh lệch chỉ 0.05) -> Không kết luận vi phạm
+    # no-helmet 0.65 không vượt helmet 0.6 + margin 0.1 -> UNKNOWN.
     labels_conflict = [
         PPEDetection(label="helmet", confidence=0.6),
         PPEDetection(label="no-helmet", confidence=0.65),

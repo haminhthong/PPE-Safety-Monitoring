@@ -95,9 +95,7 @@ class SessionReport:
             time_seconds = round((frame_id - 1) / fps, 3) if fps and fps > 0.0 else 0.0
         time_seconds = round(time_seconds, 3)
         event_start_seconds = (
-            round(event_start_seconds, 3)
-            if event_start_seconds is not None
-            else time_seconds
+            round(event_start_seconds, 3) if event_start_seconds is not None else time_seconds
         )
         iso_now = datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -130,6 +128,7 @@ class SessionReport:
 
         payload = {
             "source": self.source,
+            "synthetic_demo": bool(self.resolved_config.get("demo_mode", False)),
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "total_frames": self.total_frames,

@@ -16,7 +16,7 @@ from training.train import build_train_kwargs
 
 
 def test_training_config_fields_are_forwarded() -> None:
-    """Đảm bảo các trường siêu tham số trong config được train.py trích xuất và chuyển tiếp đầy đủ."""
+    """Đảm bảo train.py chuyển tiếp đủ siêu tham số trong config."""
     sample_cfg = {
         "experiment_name": "test_exp",
         "data_config": "training/data.yaml",
@@ -52,17 +52,35 @@ def test_manifest_builder_uses_real_file_hashes_and_group_split(tmp_path: Path) 
     label_path.write_text("0 0.5 0.5 1.0 1.0\n", encoding="utf-8")
     metadata_path = tmp_path / "metadata.csv"
     fields = [
-        "sample_id", "parent_video_id", "frame_id", "timestamp_ms", "camera_id",
-        "site_id", "recording_session", "image_path", "label_path", "class_labels",
-        "split", "source_id", "annotation_version",
+        "sample_id",
+        "parent_video_id",
+        "frame_id",
+        "timestamp_ms",
+        "camera_id",
+        "site_id",
+        "recording_session",
+        "image_path",
+        "label_path",
+        "class_labels",
+        "split",
+        "source_id",
+        "annotation_version",
     ]
     rows = [
         {
-            "sample_id": "frame-1", "parent_video_id": "video-1", "frame_id": "1",
-            "timestamp_ms": "0", "camera_id": "cam-1", "site_id": "site-1",
-            "recording_session": "session-1", "image_path": image_path.name,
-            "label_path": label_path.name, "class_labels": "helmet", "split": "train",
-            "source_id": "fixture", "annotation_version": "1.0",
+            "sample_id": "frame-1",
+            "parent_video_id": "video-1",
+            "frame_id": "1",
+            "timestamp_ms": "0",
+            "camera_id": "cam-1",
+            "site_id": "site-1",
+            "recording_session": "session-1",
+            "image_path": image_path.name,
+            "label_path": label_path.name,
+            "class_labels": "helmet",
+            "split": "train",
+            "source_id": "fixture",
+            "annotation_version": "1.0",
         }
     ]
     with metadata_path.open("w", encoding="utf-8", newline="") as file:

@@ -1,4 +1,4 @@
-"""Module thực hiện suy luận (inference) hai giai đoạn bằng YOLO kèm liên kết không gian (Spatial Association).
+"""Suy luận hai giai đoạn bằng YOLO và liên kết không gian.
 
 Giai đoạn 1: Mô hình YOLO phát hiện đối tượng người (Person) trong khung hình.
 Giai đoạn 2: Trích xuất vùng ảnh ROI người và đưa vào mô hình YOLO thứ 2 để nhận diện PPE
@@ -19,7 +19,7 @@ import numpy as np
 
 from .config import DetectionConfig
 from .crops import CropWindow, PersonCropBuilder
-from .models import PPEState, PersonDetection, PPEDetection, PPEStatus
+from .models import PersonDetection, PPEDetection, PPEState, PPEStatus
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +47,9 @@ def is_center_in_roi(box: list[float], roi_polygon: list[tuple[int, int]]) -> bo
     return res >= 0
 
 
-def _clip_polygon(polygon: list[tuple[float, float]], axis: int, value: float, keep_greater: bool) -> list[tuple[float, float]]:
+def _clip_polygon(
+    polygon: list[tuple[float, float]], axis: int, value: float, keep_greater: bool
+) -> list[tuple[float, float]]:
     """Cắt đa giác theo một cạnh ngang/dọc của hình chữ nhật."""
     if not polygon:
         return []
@@ -78,13 +80,16 @@ def _polygon_area(polygon: list[tuple[float, float]]) -> float:
     """Tính diện tích đa giác bằng công thức dây giày."""
     if len(polygon) < 3:
         return 0.0
-    return abs(
-        sum(
-            polygon[index][0] * polygon[(index + 1) % len(polygon)][1]
-            - polygon[(index + 1) % len(polygon)][0] * polygon[index][1]
-            for index in range(len(polygon))
+    return (
+        abs(
+            sum(
+                polygon[index][0] * polygon[(index + 1) % len(polygon)][1]
+                - polygon[(index + 1) % len(polygon)][0] * polygon[index][1]
+                for index in range(len(polygon))
+            )
         )
-    ) / 2.0
+        / 2.0
+    )
 
 
 def roi_overlap_ratio(box: list[float], roi_polygon: list[tuple[int, int]]) -> float:
@@ -308,7 +313,7 @@ class DualModelDetector:
                 torso_max=self.config.torso_zone_max,
             ):
                 LOGGER.debug(
-                    "Bỏ qua phát hiện [%s] tại vị trí y=%.2f do không đúng phân vùng cơ thể (crowded scene noise).",
+                    "Bỏ qua phát hiện [%s] tại vị trí y=%.2f vì sai phân vùng cơ thể.",
                     name,
                     (b_box[1] + b_box[3]) / (2.0 * roi_h),
                 )
@@ -319,7 +324,7 @@ class DualModelDetector:
         return self._build_ppe_status(labels)
 
     def detect(self, frame: np.ndarray) -> list[PersonDetection]:
-        """Phát hiện người và kiểm tra trạng thái trang bị bảo hộ trên khung hình (chuẩn 2 giai đoạn)."""
+        """Phát hiện người và PPE trên khung hình theo hai giai đoạn."""
         if frame is None or frame.size == 0:
             raise ValueError("Khung hình đầu vào rỗng.")
 
@@ -348,24 +353,14 @@ class DualModelDetector:
     def _build_ppe_status(self, labels: list[PPEDetection]) -> PPEStatus:
         """Phân tích logic vi phạm dựa trên confidence, conflict_margin và scores."""
         helmet_scores = [
-            item.confidence
-            for item in labels
-            if self._normalize(item.label) == "helmet"
+            item.confidence for item in labels if self._normalize(item.label) == "helmet"
         ]
         no_helmet_scores = [
-            item.confidence
-            for item in labels
-            if self._normalize(item.label) == "no-helmet"
+            item.confidence for item in labels if self._normalize(item.label) == "no-helmet"
         ]
-        vest_scores = [
-            item.confidence
-            for item in labels
-            if self._normalize(item.label) == "vest"
-        ]
+        vest_scores = [item.confidence for item in labels if self._normalize(item.label) == "vest"]
         no_vest_scores = [
-            item.confidence
-            for item in labels
-            if self._normalize(item.label) == "no-vest"
+            item.confidence for item in labels if self._normalize(item.label) == "no-vest"
         ]
 
         h_score = max(helmet_scores, default=0.0)
@@ -384,8 +379,12 @@ class DualModelDetector:
             no_helmet_score=nh_score,
             vest_score=v_score,
             no_vest_score=nv_score,
-            helmet_evidence=[item for item in labels if self._normalize(item.label) in {"helmet", "no-helmet"}],
-            vest_evidence=[item for item in labels if self._normalize(item.label) in {"vest", "no-vest"}],
+            helmet_evidence=[
+                item for item in labels if self._normalize(item.label) in {"helmet", "no-helmet"}
+            ],
+            vest_evidence=[
+                item for item in labels if self._normalize(item.label) in {"vest", "no-vest"}
+            ],
         )
 
     @staticmethod
@@ -460,12 +459,22 @@ class SyntheticDemoDetector:
                 PPEDetection(
                     label="no-helmet",
                     confidence=0.85,
-                    box=[float(roi_w * 0.2), float(roi_h * 0.05), float(roi_w * 0.8), float(roi_h * 0.30)],
+                    box=[
+                        float(roi_w * 0.2),
+                        float(roi_h * 0.05),
+                        float(roi_w * 0.8),
+                        float(roi_h * 0.30),
+                    ],
                 ),
                 PPEDetection(
                     label="no-vest",
                     confidence=0.82,
-                    box=[float(roi_w * 0.1), float(roi_h * 0.35), float(roi_w * 0.9), float(roi_h * 0.70)],
+                    box=[
+                        float(roi_w * 0.1),
+                        float(roi_h * 0.35),
+                        float(roi_w * 0.9),
+                        float(roi_h * 0.70),
+                    ],
                 ),
             ]
             return PPEStatus(
@@ -482,12 +491,22 @@ class SyntheticDemoDetector:
                 PPEDetection(
                     label="helmet",
                     confidence=0.89,
-                    box=[float(roi_w * 0.2), float(roi_h * 0.05), float(roi_w * 0.8), float(roi_h * 0.30)],
+                    box=[
+                        float(roi_w * 0.2),
+                        float(roi_h * 0.05),
+                        float(roi_w * 0.8),
+                        float(roi_h * 0.30),
+                    ],
                 ),
                 PPEDetection(
                     label="vest",
                     confidence=0.86,
-                    box=[float(roi_w * 0.1), float(roi_h * 0.35), float(roi_w * 0.9), float(roi_h * 0.70)],
+                    box=[
+                        float(roi_w * 0.1),
+                        float(roi_h * 0.35),
+                        float(roi_w * 0.9),
+                        float(roi_h * 0.70),
+                    ],
                 ),
             ]
             return PPEStatus(
@@ -517,8 +536,16 @@ class SyntheticDemoDetector:
             confidence=0.92,
             ppe=PPEStatus(
                 detections=[
-                    PPEDetection(label="helmet", confidence=0.89, box=[10.0, 5.0, float(w - 10), float(h * 0.28)]),
-                    PPEDetection(label="vest", confidence=0.86, box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)]),
+                    PPEDetection(
+                        label="helmet",
+                        confidence=0.89,
+                        box=[10.0, 5.0, float(w - 10), float(h * 0.28)],
+                    ),
+                    PPEDetection(
+                        label="vest",
+                        confidence=0.86,
+                        box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)],
+                    ),
                 ],
                 helmet_state=PPEState.PRESENT,
                 vest_state=PPEState.PRESENT,
@@ -535,8 +562,16 @@ class SyntheticDemoDetector:
             confidence=0.88,
             ppe=PPEStatus(
                 detections=[
-                    PPEDetection(label="no-helmet", confidence=0.85, box=[10.0, 5.0, float(w - 10), float(h * 0.28)]),
-                    PPEDetection(label="no-vest", confidence=0.81, box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)]),
+                    PPEDetection(
+                        label="no-helmet",
+                        confidence=0.85,
+                        box=[10.0, 5.0, float(w - 10), float(h * 0.28)],
+                    ),
+                    PPEDetection(
+                        label="no-vest",
+                        confidence=0.81,
+                        box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)],
+                    ),
                 ],
                 helmet_state=PPEState.ABSENT,
                 vest_state=PPEState.ABSENT,

@@ -26,7 +26,7 @@ def test_two_threshold_tracker_association() -> None:
 
 
 def test_motion_prediction_prevents_box_freeze() -> None:
-    """Khi không chạy detector, tracker predict() phải nội suy di chuyển theo vận tốc, không đứng yên."""
+    """predict() phải nội suy chuyển động thay vì giữ box đứng yên."""
     tracker = TwoThresholdIoUTracker()
 
     # Frame 1
@@ -37,12 +37,12 @@ def test_motion_prediction_prevents_box_freeze() -> None:
     # Frame 3: Non-detection frame -> gọi predict()
     pred_tracks = tracker.predict()
     assert len(pred_tracks) == 1
-    # Bounding box phải dịch chuyển theo vận tốc (x1 > 110.0) chứ không bị đóng băng cứng ở 110.0
+    # Box phải dịch chuyển theo vận tốc, không đóng băng ở x1 = 110.0.
     assert pred_tracks[0].box[0] > 110.0
 
 
 def test_max_missed_detections_semantics() -> None:
-    """Xác nhận max_missed_detections tính theo chu kỳ detector (update cycles), không xóa track quá sớm."""
+    """Xác nhận số chu kỳ bỏ lỡ trước khi tracker xóa track."""
     tracker = TwoThresholdIoUTracker(max_missed_detections=3)
 
     tracker.update([PersonDetection(box=[10.0, 10.0, 50.0, 80.0], confidence=0.9)])

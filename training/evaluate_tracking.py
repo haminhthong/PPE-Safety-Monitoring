@@ -22,6 +22,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("evaluate_tracking")
 
 
+def _to_mot_box(box: list[float]) -> list[float]:
+    """Đổi box nội bộ ``[x1, y1, x2, y2]`` sang format MOT ``[x, y, w, h]``."""
+    if len(box) != 4:
+        raise ValueError(f"Bounding box phải có 4 giá trị: {box}")
+    x1, y1, x2, y2 = map(float, box)
+    width = x2 - x1
+    height = y2 - y1
+    if width <= 0.0 or height <= 0.0:
+        raise ValueError(f"Bounding box phải có kích thước dương: {box}")
+    return [x1, y1, width, height]
+
+
 def evaluate_tracking_trajectories(
     gt_trajectories: list[dict[str, Any]],
     pred_trajectories: list[dict[str, Any]] | None,
@@ -59,8 +71,8 @@ def evaluate_tracking_trajectories(
         curr_preds = pred_by_frame[fid]
         gt_ids = [item["track_id"] for item in curr_gts]
         pred_ids = [item["track_id"] for item in curr_preds]
-        gt_boxes = [item["box"] for item in curr_gts]
-        pred_boxes = [item["box"] for item in curr_preds]
+        gt_boxes = [_to_mot_box(item["box"]) for item in curr_gts]
+        pred_boxes = [_to_mot_box(item["box"]) for item in curr_preds]
         distances = mm.distances.iou_matrix(gt_boxes, pred_boxes, max_iou=0.5)
         accumulator.update(gt_ids, pred_ids, distances, frameid=fid)
 

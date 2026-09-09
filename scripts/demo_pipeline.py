@@ -24,9 +24,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     image_path = output_dir / "synthetic_demo.jpg"
-    cv2.imwrite(str(image_path), np.zeros((480, 640, 3), dtype=np.uint8))
+    if not cv2.imwrite(str(image_path), np.zeros((480, 640, 3), dtype=np.uint8)):
+        raise OSError(f"Không thể tạo ảnh demo: {image_path}")
 
-    config = DetectionConfig(
+    policy_path = Path(__file__).resolve().parents[1] / "configs" / "runtime_policy.yaml"
+    config = DetectionConfig.load_from_policy(
+        policy_path,
         demo_mode=True,
         show_window=False,
         save_output=True,

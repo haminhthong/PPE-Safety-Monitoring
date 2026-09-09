@@ -42,12 +42,14 @@ def calculate_stage_wise_funnel(stage_counts: dict[str, int]) -> dict[str, Any]:
         if previous is not None and count > previous:
             raise ValueError("Funnel phải không tăng giữa các stage.")
         stage_recall = count / previous if previous is not None else 1.0
-        stages.append({
-            "stage": stage,
-            "count": count,
-            "stage_recall": round(stage_recall, 4),
-            "cumulative_recall": round(count / first, 4),
-        })
+        stages.append(
+            {
+                "stage": stage,
+                "count": count,
+                "stage_recall": round(stage_recall, 4),
+                "cumulative_recall": round(count / first, 4),
+            }
+        )
         previous = count
     return {"stages": stages, "source": "locked_test_artifacts"}
 
@@ -69,12 +71,13 @@ def calculate_pareto_frontier(candidates: list[dict[str, Any]]) -> list[dict[str
 def run_full_system_evaluation(
     ppe_model: str | None = None,
     person_model: str | None = None,
-    data_config: str | None = None,
+    ppe_data_config: str | None = None,
+    person_data_config: str | None = None,
     gt_tracks: list[dict[str, Any]] | None = None,
     pred_tracks: list[dict[str, Any]] | None = None,
     gt_events: list[dict[str, Any]] | None = None,
     pred_events: list[dict[str, Any]] | None = None,
-    gt_to_pred_map: dict[int, int] | None = None,
+    gt_to_pred_map: dict[object, object] | None = None,
     duration_hours: float | None = None,
     demo: bool = False,
 ) -> dict[str, Any]:
@@ -84,7 +87,8 @@ def run_full_system_evaluation(
     required = {
         "ppe_model": ppe_model,
         "person_model": person_model,
-        "data_config": data_config,
+        "ppe_data_config": ppe_data_config,
+        "person_data_config": person_data_config,
         "gt_tracks": gt_tracks,
         "pred_tracks": pred_tracks,
         "gt_events": gt_events,
@@ -98,8 +102,10 @@ def run_full_system_evaluation(
         "system_name": "PPE Safety Monitoring",
         "evaluation_protocol": "locked_test_full_video",
         "layer_1_and_2_perception": {
-            "ppe_detector": evaluate_ppe_detector(ppe_model, data_config, "test"),
-            "person_detector": evaluate_person_detector(person_model, "test", data_config=data_config),
+            "ppe_detector": evaluate_ppe_detector(ppe_model, ppe_data_config, "test"),
+            "person_detector": evaluate_person_detector(
+                person_model, "test", person_data_config=person_data_config
+            ),
         },
         "layer_3_tracking": evaluate_tracking_trajectories(gt_tracks, pred_tracks),
         "layer_4_violation_events": evaluate_violation_events(
@@ -115,15 +121,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá toàn diện hệ thống PPE 4 tầng")
     parser.add_argument("--ppe-model", required=False, help="PPE weights đã freeze")
     parser.add_argument("--person-model", required=False, help="Person weights đã freeze")
-    parser.add_argument("--data", required=False, help="Dataset config full-frame/PPE")
+    parser.add_argument("--ppe-data", required=False, help="Dataset config cho PPE person-crop")
+    parser.add_argument("--person-data", required=False, help="Dataset config full-frame Person")
     parser.add_argument("--gt-tracks", help="JSON GT trajectories")
     parser.add_argument("--pred-tracks", help="JSON predicted trajectories")
     parser.add_argument("--gt-events", help="JSON GT interval events")
     parser.add_argument("--pred-events", help="JSON predicted events")
-    parser.add_argument("--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID")
+    parser.add_argument(
+        "--gt-to-pred-map", help="JSON object ánh xạ GT track ID sang predicted track ID"
+    )
     parser.add_argument("--duration-hours", type=float, help="Tổng thời lượng locked test")
-    parser.add_argument("--demo", action="store_true", help="Chỉ trả metadata demo, không phải benchmark")
-    parser.add_argument("--output", default="runs/system_evaluation_report.json", help="File xuất báo cáo")
+    parser.add_argument(
+        "--demo", action="store_true", help="Chỉ trả metadata demo, không phải benchmark"
+    )
+    parser.add_argument(
+        "--output", default="runs/system_evaluation_report.json", help="File xuất báo cáo"
+    )
     args = parser.parse_args()
 
     def load_json(path: str | None) -> list[dict[str, Any]] | None:
@@ -137,7 +150,7 @@ def main() -> None:
             parser.error(f"Artifact phải là JSON array: {file}")
         return value
 
-    def load_id_map(path: str | None) -> dict[int, int] | None:
+    def load_id_map(path: str | None) -> dict[str, str] | None:
         if not path:
             return None
         file = Path(path)
@@ -146,12 +159,13 @@ def main() -> None:
         value = json.loads(file.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             parser.error("Identity map phải là JSON object.")
-        return {int(key): int(mapped) for key, mapped in value.items()}
+        return {str(key): str(mapped) for key, mapped in value.items()}
 
     report = run_full_system_evaluation(
         ppe_model=args.ppe_model,
         person_model=args.person_model,
-        data_config=args.data,
+        ppe_data_config=args.ppe_data,
+        person_data_config=args.person_data,
         gt_tracks=load_json(args.gt_tracks),
         pred_tracks=load_json(args.pred_tracks),
         gt_events=load_json(args.gt_events),

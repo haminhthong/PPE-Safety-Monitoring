@@ -1,6 +1,6 @@
 """Giao diện Web Tương tác (Streamlit Web Dashboard) cho Hệ thống PPE Surveillance.
 
-Cho phép người dùng tải lên file ảnh/video, tùy chỉnh các ngưỡng phát hiện (Confidence, NMS, Frame Interval)
+Cho phép tải ảnh/video và tùy chỉnh ngưỡng phát hiện.
 và xem trực tiếp kết quả phát hiện vi phạm trang bị bảo hộ kèm biểu đồ phân tích thống kê.
 
 Chạy ứng dụng:
@@ -69,7 +69,8 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.markdown(
-        "<div class='sub-header'>Ứng dụng Deep Learning YOLO & IoU Tracking phát hiện vi phạm mũ và áo bảo hộ thời gian thực</div>",
+        "<div class='sub-header'>Ứng dụng YOLO và IoU Tracking phát hiện "
+        "vi phạm mũ, áo bảo hộ theo thời gian thực</div>",
         unsafe_allow_html=True,
     )
 
@@ -79,12 +80,15 @@ def main() -> None:
     demo_mode = st.sidebar.checkbox(
         "⚡ Chế độ mô phỏng pipeline (Demo Simulation)",
         value=True,
-        help="Bật chế độ mô phỏng thử nghiệm SyntheticDemoDetector mà không cần tải trước trọng số mô hình.",
+        help=(
+            "Bật SyntheticDemoDetector để thử pipeline mà không cần trọng số mô hình."
+        ),
     )
 
     if demo_mode:
         st.markdown(
-            "<div class='demo-warning'>⚠️ <b>CHẾ ĐỘ MÔ PHỎNG PIPELINE ACTIVE</b>: Kết quả đang được tạo lập giả định bởi SyntheticDemoDetector, không phải suy luận AI thực tế từ trọng số model.</div>",
+            "<div class='demo-warning'>⚠️ <b>CHẾ ĐỘ MÔ PHỎNG PIPELINE</b>: "
+            "Kết quả do SyntheticDemoDetector tạo, không phải model thật.</div>",
             unsafe_allow_html=True,
         )
 
@@ -142,14 +146,16 @@ def main() -> None:
 
     if uploaded_file is None:
         st.info(
-            "💡 **Gợi ý**: Hãy tải lên một file ảnh hoặc video để trải nghiệm. Hoặc bật chế độ mô phỏng pipeline ở thanh bên trái."
+            "💡 **Gợi ý**: Tải ảnh/video lên để trải nghiệm hoặc bật chế độ "
+            "mô phỏng ở thanh bên trái."
         )
         return
 
     # Kiểm tra kích thước file upload
     if uploaded_file.size > MAX_UPLOAD_MB * 1024 * 1024:
         st.error(
-            f"❌ File upload vượt quá giới hạn tối đa cho phép ({MAX_UPLOAD_MB} MB). Vui lòng chọn file nhỏ hơn."
+            f"❌ File upload vượt quá giới hạn {MAX_UPLOAD_MB} MB. "
+            "Vui lòng chọn file nhỏ hơn."
         )
         return
 
@@ -160,23 +166,27 @@ def main() -> None:
     person_path = Path(person_model_str) if not demo_mode and person_model_str else None
     ppe_path = Path(ppe_model_str) if not demo_mode and ppe_model_str else None
 
-    config = DetectionConfig.load_from_policy(
-        policy_path,
-        person_model_path=person_path,
-        ppe_model_path=ppe_path,
-        person_confidence=person_conf,
-        ppe_confidence=ppe_conf,
-        detection_interval=person_detection_interval,
-        ppe_detection_interval=ppe_detection_interval,
-        violation_confirm_seconds=confirm_seconds,
-        resolution_confirm_seconds=resolve_seconds,
-        show_window=False,
-        save_output=True,
-        save_snapshots=save_snapshots,
-        output_dir=Path("outputs"),
-        demo_mode=demo_mode,
-        enable_beep=False,
-    )
+    try:
+        config = DetectionConfig.load_from_policy(
+            policy_path,
+            person_model_path=person_path,
+            ppe_model_path=ppe_path,
+            person_confidence=person_conf,
+            ppe_confidence=ppe_conf,
+            detection_interval=person_detection_interval,
+            ppe_detection_interval=ppe_detection_interval,
+            violation_confirm_seconds=confirm_seconds,
+            resolution_confirm_seconds=resolve_seconds,
+            show_window=False,
+            save_output=True,
+            save_snapshots=save_snapshots,
+            output_dir=Path("outputs"),
+            demo_mode=demo_mode,
+            enable_beep=False,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        st.error(f"Runtime policy không hợp lệ: {error}")
+        return
 
     tmp_path: Path | None = None
     try:
@@ -196,7 +206,7 @@ def main() -> None:
             if not cap.isOpened():
                 cap.release()
                 st.error(
-                    "❌ OpenCV không thể mở file video này. Vui lòng kiểm tra codec hoặc chọn định dạng .mp4."
+                    "❌ OpenCV không thể mở video. Kiểm tra codec hoặc chọn .mp4."
                 )
                 return
             cap.release()

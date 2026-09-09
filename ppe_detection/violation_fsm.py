@@ -3,19 +3,19 @@
 Quản lý chu kỳ vòng đời của một trạng thái vi phạm:
     COMPLIANT (Tuân thủ)
        ↓ (ABSENT đủ confirm_after_sec)
-    ALERTED (Báo động vi phạm chính thức - Emitted Alert & Evidence Snapshot)
+    ALERTED (Báo động chính thức và lưu snapshot bằng chứng)
        ↓ (PRESENT đủ resolve_after_sec)
     RESOLVED (Đã khắc phục vi phạm)
        ↓ (tái phạm liên tiếp >= confirm_observations)
     ALERTED (Báo động tái phạm - Recurrent Violation Event)
 
-Ngăn chặn báo động giả đồng thời loại bỏ giới hạn one-shot (cho phép phát hiện công nhân tháo mũ sau đó).
+Ngăn báo động giả và cho phép phát hiện công nhân tái phạm sau khi đã khắc phục.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .models import PPEState, ViolationState
 
@@ -56,7 +56,12 @@ class TemporalViolationFSM:
         """
         self.confirm_observations = max(1, confirm_observations) if confirm_observations else None
         self.resolve_observations = max(1, resolve_observations) if resolve_observations else None
-        if confirm_after_sec < 0 or resolve_after_sec < 0 or alert_cooldown_sec < 0 or track_ttl_sec <= 0:
+        if (
+            confirm_after_sec < 0
+            or resolve_after_sec < 0
+            or alert_cooldown_sec < 0
+            or track_ttl_sec <= 0
+        ):
             raise ValueError("Ngưỡng thời gian FSM không hợp lệ.")
         self.confirm_after_sec = confirm_after_sec
         self.resolve_after_sec = resolve_after_sec
@@ -94,7 +99,6 @@ class TemporalViolationFSM:
         Returns:
             `FSMTransitionResult` chứa chỉ dẫn có cần phát cảnh báo hoặc thông báo khắc phục không.
         """
-        key = (track_id, violation_type)
         v_state = self.get_state(track_id, violation_type)
         prev_state = v_state.state
 
@@ -136,23 +140,30 @@ class TemporalViolationFSM:
                 v_state.violation_started_at_sec = timestamp_sec
 
             elapsed = timestamp_sec - v_state.violation_started_at_sec
-            count_ready = self.confirm_observations is not None and v_state.consecutive_positive >= self.confirm_observations
+            count_ready = (
+                self.confirm_observations is not None
+                and v_state.consecutive_positive >= self.confirm_observations
+            )
             time_ready = elapsed >= self.confirm_after_sec
             if v_state.state in {"COMPLIANT", "VIOLATING", "RESOLVED"}:
                 if time_ready or count_ready:
-                    is_recurrence = v_state.state == "RESOLVED"
-                    v_state.state = "ALERTED"
-                    v_state.event_count += 1
-                    v_state.started_at_frame = frame_id
-                    v_state.started_at_sec = v_state.violation_started_at_sec
                     cooldown_ok = (
                         v_state.last_alert_at_sec is None
                         or timestamp_sec - v_state.last_alert_at_sec >= self.alert_cooldown_sec
                     )
-                    should_emit = cooldown_ok
-                    if should_emit:
+                    if cooldown_ok:
+                        is_recurrence = v_state.event_count > 0
+                        v_state.state = "ALERTED"
+                        v_state.event_count += 1
+                        v_state.started_at_frame = frame_id
+                        v_state.started_at_sec = v_state.violation_started_at_sec
+                        should_emit = True
                         v_state.last_alert_at_sec = timestamp_sec
                         LOGGER.info("XÁC NHẬN vi phạm ID %d - %s.", track_id, violation_type)
+                    else:
+                        # Giữ vi phạm ở trạng thái chờ. Khi cooldown kết thúc,
+                        # observation ABSENT tiếp theo vẫn có thể phát cảnh báo.
+                        v_state.state = "VIOLATING"
                 else:
                     v_state.state = "VIOLATING"
         else:
@@ -166,7 +177,10 @@ class TemporalViolationFSM:
                 if v_state.compliance_started_at_sec is None:
                     v_state.compliance_started_at_sec = timestamp_sec
                 elapsed = timestamp_sec - v_state.compliance_started_at_sec
-                count_ready = self.resolve_observations is not None and v_state.consecutive_negative >= self.resolve_observations
+                count_ready = (
+                    self.resolve_observations is not None
+                    and v_state.consecutive_negative >= self.resolve_observations
+                )
                 if elapsed >= self.resolve_after_sec or count_ready:
                     v_state.state = "RESOLVED"
                     v_state.resolved_at_sec = timestamp_sec
@@ -185,7 +199,9 @@ class TemporalViolationFSM:
             observation_state=observation_state,
         )
 
-    def clean_inactive_tracks(self, active_track_ids: set[int], now_sec: float | None = None) -> None:
+    def clean_inactive_tracks(
+        self, active_track_ids: set[int], now_sec: float | None = None
+    ) -> None:
         """Dọn track không còn hoạt động hoặc đã quá TTL thời gian."""
         to_delete = []
         for key, state in self.states.items():

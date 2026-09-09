@@ -17,6 +17,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("evaluate_detector")
 
 
+def _validate_split(split: str) -> None:
+    """Chỉ cho phép đánh giá trên validation hoặc locked test."""
+    if split not in {"val", "test"}:
+        raise ValueError("split phải là val hoặc test.")
+
+
 def evaluate_ppe_detector(
     model_path: str,
     data_config: str = "training/data.yaml",
@@ -24,11 +30,17 @@ def evaluate_ppe_detector(
     demo: bool = False,
 ) -> dict[str, Any]:
     """Đánh giá Layer 1: Hiệu năng phát hiện 4 lớp trang bị bảo hộ PPE."""
+    _validate_split(split)
     if demo:
-        return {"synthetic_demo": True, "metrics_available": False, "model": model_path, "split": split}
+        return {
+            "synthetic_demo": True,
+            "metrics_available": False,
+            "model": model_path,
+            "split": split,
+        }
     model_file = Path(model_path)
     if not data_config:
-        raise FileNotFoundError("PPE evaluation bắt buộc cần --data chứa annotation PPE.")
+        raise FileNotFoundError("PPE evaluation bắt buộc cần --ppe-data chứa annotation PPE.")
     data_file = Path(data_config)
     if not model_file.is_file():
         raise FileNotFoundError(f"Không tìm thấy PPE weights: {model_file}")
@@ -53,9 +65,7 @@ def evaluate_ppe_detector(
     }
 
     class_names = (
-        results.names.items()
-        if isinstance(results.names, dict)
-        else enumerate(results.names)
+        results.names.items() if isinstance(results.names, dict) else enumerate(results.names)
     )
     for idx, cls_name in class_names:
         if idx < len(results.box.p):
@@ -77,21 +87,29 @@ def evaluate_person_detector(
     person_model_path: str,
     split: str = "test",
     demo: bool = False,
-    data_config: str | None = None,
+    person_data_config: str | None = None,
 ) -> dict[str, Any]:
     """Đánh giá Layer 2: Khả năng phát hiện người lao động trong bối cảnh công trường."""
     if demo:
-        return {"synthetic_demo": True, "metrics_available": False, "model": person_model_path, "split": split}
+        return {
+            "synthetic_demo": True,
+            "metrics_available": False,
+            "model": person_model_path,
+            "split": split,
+        }
     model_file = Path(person_model_path)
     if not model_file.is_file():
         raise FileNotFoundError(f"Không tìm thấy Person weights: {model_file}")
-    if not data_config or not Path(data_config).is_file():
-        raise FileNotFoundError("Person evaluation bắt buộc cần --data chứa annotation full-frame.")
+    _validate_split(split)
+    if not person_data_config or not Path(person_data_config).is_file():
+        raise FileNotFoundError(
+            "Person evaluation bắt buộc cần --person-data chứa annotation full-frame."
+        )
 
     from ultralytics import YOLO
 
     model = YOLO(str(model_file))
-    results = model.val(data=data_config, split=split, classes=[0], verbose=False)
+    results = model.val(data=person_data_config, split=split, classes=[0], verbose=False)
     box = results.box
     return {
         "model": str(model_file),
@@ -106,9 +124,18 @@ def evaluate_person_detector(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Đánh giá Layer 1 & 2: PPE và Person Detector")
-    parser.add_argument("--ppe-model", default="models/best.pt", help="Đường dẫn trọng số PPE model")
-    parser.add_argument("--person-model", default="models/yolov8n.pt", help="Đường dẫn Person model")
-    parser.add_argument("--data", default="training/data.yaml", help="Dataset config")
+    parser.add_argument(
+        "--ppe-model", default="models/best.pt", help="Đường dẫn trọng số PPE model"
+    )
+    parser.add_argument(
+        "--person-model", default="models/yolov8n.pt", help="Đường dẫn Person model"
+    )
+    parser.add_argument(
+        "--ppe-data", default="training/data.yaml", help="Dataset config cho PPE person-crop"
+    )
+    parser.add_argument(
+        "--person-data", required=False, help="Dataset config full-frame có class person"
+    )
     parser.add_argument("--split", default="test", help="val hoặc test")
     parser.add_argument("--demo", action="store_true", help="Chạy chế độ giả lập benchmark")
     parser.add_argument("--output", default="runs/eval_detector.json", help="File lưu kết quả")
@@ -117,9 +144,12 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ppe_res = evaluate_ppe_detector(args.ppe_model, args.data, args.split, demo=args.demo)
+    ppe_res = evaluate_ppe_detector(args.ppe_model, args.ppe_data, args.split, demo=args.demo)
     person_res = evaluate_person_detector(
-        args.person_model, args.split, demo=args.demo, data_config=args.data
+        args.person_model,
+        args.split,
+        demo=args.demo,
+        person_data_config=args.person_data,
     )
 
     report = {

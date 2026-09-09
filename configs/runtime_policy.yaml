@@ -20,6 +20,7 @@ tracking_policy:
 
 spatial_association_policy:
   enable_body_zone_filter: true
+  roi_polygon: null                   # Danh sách [x, y] theo độ phân giải nguồn; null = không lọc ROI
   head_zone:
     y_min_ratio: 0.00
     y_max_ratio: 0.35                    # Helmet/no-helmet ở 35% phía trên person ROI

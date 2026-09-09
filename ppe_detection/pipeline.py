@@ -5,7 +5,8 @@ Kết nối các thành phần theo chuẩn kiến trúc Online Canonical:
 2. Multi-Object Tracking (baseline IoU hai ngưỡng hoặc IoU kèm Motion Prediction)
 3. Trích xuất Person Track ROIs
 4. PPE Detector kèm Spatial Body-Zone Association
-5. Temporal Violation FSM (Finite State Machine: COMPLIANT → VIOLATING → ALERTED → RESOLVED → VIOLATING)
+5. Temporal Violation FSM:
+   COMPLIANT → VIOLATING → ALERTED → RESOLVED → VIOLATING
 6. Snapshot bằng chứng, cảnh báo âm thanh và xuất báo cáo đa định dạng JSON/CSV.
 """
 
@@ -22,7 +23,7 @@ import numpy as np
 from .config import DetectionConfig
 from .crops import PersonCropBuilder
 from .detector import DetectorProtocol, DualModelDetector, SyntheticDemoDetector
-from .models import PPEState, PersonDetection
+from .models import PersonDetection, PPEState
 from .reporting import SessionReport
 from .tracker import IoUTracker, Track, TrackerProtocol, TwoThresholdIoUTracker
 from .violation_fsm import TemporalViolationFSM
@@ -127,33 +128,41 @@ class PPEPipeline:
             return ""
         return str(filepath)
 
-    def _process_track_first_frame(
+    def _process_frame(
         self,
         frame: np.ndarray,
         frame_id: int,
         report: SessionReport,
         timestamp_sec: float,
+        detect_persons: bool,
     ) -> list[Track]:
-        """Detect người, cập nhật track và chỉ inspect PPE khi đến cadence."""
-        person_detections_raw = self.detector.detect_persons(frame)
+        """Xử lý một frame với cadence Person/Tracking và PPE độc lập."""
+        if detect_persons:
+            person_detections_raw = self.detector.detect_persons(frame)
+            person_dets = [
+                PersonDetection(box=box, confidence=conf) for box, conf in person_detections_raw
+            ]
+            tracks = self.tracker.update(person_dets, timestamp_sec=timestamp_sec)
+        else:
+            tracks = self.tracker.predict(timestamp_sec=timestamp_sec)
 
-        person_dets: list[PersonDetection] = []
-        for box, conf in person_detections_raw:
-            person_dets.append(PersonDetection(box=box, confidence=conf))
-
-        # Bước 1 & 2: Cập nhật vị trí vết theo dõi
-        tracks = self.tracker.update(person_dets, timestamp_sec=timestamp_sec)
-
-        # Tracking chạy mỗi frame; PPE inference chạy cadence riêng.
-        should_inspect_ppe = (
-            frame_id == 1 or frame_id % self.config.ppe_detection_interval == 0
-        )
+        # PPE cadence tính theo frame thực tế, không phụ thuộc việc Person
+        # detector có chạy ở frame đó hay không. Track dự đoán vẫn dùng được
+        # cho inspection nếu lần cập nhật Person gần nhất còn hiệu lực.
+        should_inspect_ppe = frame_id == 1 or frame_id % self.config.ppe_detection_interval == 0
         observed_track_ids: set[int] = set()
         for track in tracks:
             report.unique_track_ids.add(track.track_id)
-            if not track.updated or not should_inspect_ppe:
+            if not should_inspect_ppe or track.disappeared > 0:
                 continue
-            roi, crop_window = self.crop_builder.crop(frame, track.box)
+            try:
+                roi, crop_window = self.crop_builder.crop(frame, track.box)
+            except ValueError:
+                LOGGER.debug(
+                    "Bỏ qua PPE inspection vì track %d nằm ngoài khung hình.",
+                    track.track_id,
+                )
+                continue
             ppe_status = self.detector.analyze_ppe_for_roi(
                 roi,
                 person_box=track.box,
@@ -168,9 +177,7 @@ class PPEPipeline:
             )
 
         # Chỉ trạng thái PPE vừa quan sát mới được đưa vào FSM.
-        self._evaluate_fsm(
-            frame, tracks, report, frame_id, timestamp_sec, observed_track_ids
-        )
+        self._evaluate_fsm(frame, tracks, report, frame_id, timestamp_sec, observed_track_ids)
         self.fsm.clean_inactive_tracks({track.track_id for track in tracks}, timestamp_sec)
 
         return tracks
@@ -188,7 +195,7 @@ class PPEPipeline:
         should_alert = False
 
         for track in tracks:
-            if not track.updated or track.track_id not in observed_track_ids:
+            if track.track_id not in observed_track_ids:
                 continue
 
             for kind, state in (
@@ -269,7 +276,7 @@ class PPEPipeline:
             self._show_image(annotated)
 
     def _run_stream(self, source: int | str, report: SessionReport) -> None:
-        """Xử lý nguồn dữ liệu luồng (Video file hoặc Webcam) với Track-First và Motion Prediction."""
+        """Xử lý video hoặc webcam với Track-First và dự đoán chuyển động."""
         capture = cv2.VideoCapture(source)
         if not capture.isOpened():
             capture.release()
@@ -280,6 +287,7 @@ class PPEPipeline:
         writer = None
         output_stem = self._source_stem(source)
         prev_time = time.perf_counter()
+        stream_started_at = time.monotonic()
         smoothed_fps = 0.0
 
         try:
@@ -291,17 +299,21 @@ class PPEPipeline:
                 report.total_frames += 1
                 frame_id = report.total_frames
 
-                timestamp_sec = (frame_id - 1) / source_fps
+                timestamp_sec = self._frame_timestamp(
+                    capture, source, frame_id, source_fps, stream_started_at
+                )
                 # Person detector/tracker mặc định chạy mỗi frame; cadence có thể
                 # tăng lên chỉ khi debug hoặc tài nguyên hạn chế.
-                is_detection_frame = frame_id == 1 or frame_id % self.config.detection_interval == 0
-                if is_detection_frame:
-                    tracks = self._process_track_first_frame(
-                        frame, frame_id, report, timestamp_sec
-                    )
-                else:
-                    # Frame trung gian chỉ dự đoán chuyển động, không tạo PPE evidence.
-                    tracks = self.tracker.predict(timestamp_sec=timestamp_sec)
+                is_detection_frame = (
+                    frame_id == 1 or frame_id % self.config.detection_interval == 0
+                )
+                tracks = self._process_frame(
+                    frame,
+                    frame_id,
+                    report,
+                    timestamp_sec,
+                    detect_persons=is_detection_frame,
+                )
 
                 now = time.perf_counter()
                 curr_fps = 1.0 / max(now - prev_time, 1e-6)
@@ -371,6 +383,27 @@ class PPEPipeline:
     @staticmethod
     def _source_stem(source: int | str) -> str:
         return f"camera_{source}" if isinstance(source, int) else Path(source).stem
+
+    @staticmethod
+    def _frame_timestamp(
+        capture: cv2.VideoCapture,
+        source: int | str,
+        frame_id: int,
+        source_fps: float,
+        stream_started_at: float,
+    ) -> float:
+        """Lấy timestamp ổn định cho video file và thời gian thực cho nguồn live."""
+        source_text = str(source).lower()
+        is_live_source = isinstance(source, int) or source_text.startswith(
+            ("rtsp://", "rtmp://", "http://", "https://")
+        )
+        if is_live_source:
+            return max(0.0, time.monotonic() - stream_started_at)
+
+        position_ms = capture.get(cv2.CAP_PROP_POS_MSEC)
+        if position_ms > 0.0:
+            return position_ms / 1000.0
+        return (frame_id - 1) / source_fps
 
     @staticmethod
     def _show_image(frame: np.ndarray) -> None:

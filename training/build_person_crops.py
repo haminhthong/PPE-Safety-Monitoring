@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ppe_detection.crops import PersonCropBuilder  # noqa: E402
 
+PPE_CLASS_IDS = {"0", "1", "2", "3"}
+
 
 def _remap_yolo_labels(
     label_path: Path,
@@ -40,9 +42,13 @@ def _remap_yolo_labels(
         if len(values) != 5:
             raise ValueError(f"Label YOLO sai định dạng tại {label_path}:{line_number}")
         class_id = values[0]
+        if class_id not in PPE_CLASS_IDS:
+            raise ValueError(f"Class PPE không hợp lệ tại {label_path}:{line_number}")
         center_x, center_y, box_width, box_height = map(float, values[1:])
         if not all(0.0 <= value <= 1.0 for value in (center_x, center_y, box_width, box_height)):
             raise ValueError(f"Label YOLO ngoài khoảng [0,1] tại {label_path}:{line_number}")
+        if box_width <= 0.0 or box_height <= 0.0:
+            raise ValueError(f"Label YOLO có kích thước bằng 0 tại {label_path}:{line_number}")
 
         absolute = (
             (center_x - box_width / 2.0) * width,
@@ -74,17 +80,38 @@ def build_person_crops(manifest_path: Path, output_dir: Path, padding: int = 10)
     with manifest_path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         required = {
-            "sample_id", "image_path", "split", "person_x1", "person_y1",
-            "person_x2", "person_y2",
+            "sample_id",
+            "image_path",
+            "label_path",
+            "split",
+            "person_x1",
+            "person_y1",
+            "person_x2",
+            "person_y2",
         }
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"Manifest thiếu cột person bbox: {sorted(missing)}")
         rows = list(reader)
+    if not rows:
+        raise ValueError("Manifest không có mẫu nào.")
 
     builder = PersonCropBuilder(padding)
     written = 0
+    seen_sample_ids: set[str] = set()
+    split_images: dict[str, list[str]] = {"train": [], "val": [], "test": []}
     for row in rows:
+        sample_id = row["sample_id"].strip()
+        if not sample_id:
+            raise ValueError("sample_id không được rỗng.")
+        if sample_id in seen_sample_ids:
+            raise ValueError(f"sample_id bị trùng trong manifest: {sample_id}")
+        seen_sample_ids.add(sample_id)
+
+        target_split = row["split"].strip().lower()
+        if target_split not in {"train", "val", "test"}:
+            raise ValueError(f"Split không hợp lệ: {row['split']}")
+
         image_path = Path(row["image_path"])
         if not image_path.is_absolute():
             image_path = (manifest_path.parent / image_path).resolve()
@@ -103,13 +130,12 @@ def build_person_crops(manifest_path: Path, output_dir: Path, padding: int = 10)
             float(row["person_y2"]),
         ]
         crop, window = builder.crop(image, person_box)
-        target_split = row["split"].lower()
         image_dir = output_dir / "images" / target_split
         label_dir = output_dir / "labels" / target_split
         image_dir.mkdir(parents=True, exist_ok=True)
         label_dir.mkdir(parents=True, exist_ok=True)
-        target_path = image_dir / f"{row['sample_id']}.jpg"
-        target_label_path = label_dir / f"{row['sample_id']}.txt"
+        target_path = image_dir / f"{sample_id}.jpg"
+        target_label_path = label_dir / f"{sample_id}.txt"
         remapped_labels = _remap_yolo_labels(
             label_path,
             image.shape,
@@ -121,14 +147,22 @@ def build_person_crops(manifest_path: Path, output_dir: Path, padding: int = 10)
             "\n".join(remapped_labels) + "\n",
             encoding="utf-8",
         )
+        split_images[target_split].append(target_path.relative_to(output_dir).as_posix())
         written += 1
+
+    manifest_dir = output_dir / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    for split, image_paths in split_images.items():
+        manifest_path = manifest_dir / f"{split}.txt"
+        content = "\n".join(sorted(image_paths))
+        manifest_path.write_text(f"{content}\n" if content else "", encoding="utf-8")
     return written
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Tạo person crop sau group split")
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--output-dir", default="data/crops")
+    parser.add_argument("--output-dir", default="data/dataset_ppe")
     parser.add_argument("--padding", type=int, default=10)
     args = parser.parse_args()
     count = build_person_crops(Path(args.manifest), Path(args.output_dir), args.padding)

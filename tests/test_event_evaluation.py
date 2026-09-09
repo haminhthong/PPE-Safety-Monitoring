@@ -6,7 +6,7 @@ from training.evaluate_events import evaluate_violation_events
 
 
 def test_event_matching_with_independent_tracker_ids() -> None:
-    """Đảm bảo sự kiện vi phạm được ghép cặp chính xác theo loại vi phạm và dung sai thời gian dù ID khác nhau."""
+    """Ghép đúng loại vi phạm và thời gian dù ID tracker khác nhau."""
     # GT Person ID = 5, vi phạm mũ ở giây 12.0
     gt_events = [
         {"track_id": 5, "violation_type": "helmet", "time_seconds": 12.0},
@@ -50,9 +50,7 @@ def test_event_matching_type_mismatch_fails() -> None:
 def test_interval_event_uses_alert_time_and_identity_map() -> None:
     """Event interval phải ghép đúng cửa sổ thời gian và identity map."""
     metrics = evaluate_violation_events(
-        events_gt=[
-            {"track_id": 7, "violation_type": "vest", "start_sec": 10.0, "end_sec": 14.0}
-        ],
+        events_gt=[{"track_id": 7, "violation_type": "vest", "start_sec": 10.0, "end_sec": 14.0}],
         events_pred=[
             {
                 "track_id": 42,

@@ -39,8 +39,9 @@ def main() -> None:
 
     try:
         export_model(args.weights, args.format, args.img_size)
-    except Exception as err:
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as err:
         LOGGER.error("Lỗi xuất mô hình: %s", err)
+        raise SystemExit(1) from err
 
 
 if __name__ == "__main__":

@@ -1,381 +1,596 @@
 # PPE Safety Monitoring
-# PPE Safety Monitoring — Track-centric Event Monitoring
 
-Hệ thống nhận camera/video công trường, phát hiện người, duy trì track, kiểm
-tra PPE theo từng người và chỉ phát hành cảnh báo sau khi bằng chứng vi phạm
-tồn tại đủ lâu. Kết quả nghiệp vụ là **violation event**, không phải một
-bounding box đơn lẻ.
+[![CI](https://github.com/haminhthong/PPE-Safety-Monitoring/actions/workflows/ci.yml/badge.svg)](https://github.com/haminhthong/PPE-Safety-Monitoring/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Ultralytics YOLO](https://img.shields.io/badge/Ultralytics-YOLOv8-111F68)](https://docs.ultralytics.com/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Lint](https://img.shields.io/badge/lint-Ruff-D7FF64)](https://docs.astral.sh/ruff/)
+[![License](https://img.shields.io/badge/license-MIT-3DA639)](LICENSE)
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-green.svg)](https://docs.ultralytics.com/)
-[![Tests](https://img.shields.io/badge/tests-pytest-blue.svg)](tests/)
-[![Architecture](https://img.shields.io/badge/architecture-Track--centric-orange.svg)](#kiến-trúc)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+Hệ thống giám sát tuân thủ trang bị bảo hộ cá nhân (PPE) trên ảnh, video và
+nguồn camera. Kết quả nghiệp vụ của hệ thống là một violation event có bằng
+chứng theo thời gian, không phải một bounding box no-helmet xuất hiện ở một
+frame đơn lẻ.
 
----
+PPE hiện tại gồm bốn lớp: helmet, no-helmet, vest và no-vest.
 
-## Kiến trúc
+Runtime dùng kiến trúc hai giai đoạn: phát hiện người trên frame gốc, duy trì
+track người, cắt person ROI theo hợp đồng chung, nhận diện PPE trong ROI, giải
+quyết trạng thái PRESENT / ABSENT / UNKNOWN, rồi xác nhận vi phạm bằng FSM theo
+thời gian.
 
-```text
-Camera/video
-   ↓
-Person detection + track update mỗi frame
-   ↓
-PersonCropBuilder (padding cố định)
-   ↓
-PPE inspection theo cadence riêng
-   ↓
-Body-zone association trên person box gốc
-   ↓
-PRESENT / ABSENT / UNKNOWN
-   ↓
-Time-based violation FSM (dwell time, cooldown, TTL)
-   ↓
-Confirmed event + snapshot + JSON/CSV + human review
-```
+> Repo không chứa dataset ảnh/video thật hoặc model weights. Mọi metric production
+> phải được tạo từ artifact thật; số liệu của demo synthetic không phải benchmark.
 
----
+## Bài toán & Phạm vi ứng dụng (Problem & Scope)
 
-## 1. Pipeline Canonical 10 Giai Đoạn (System Lifecycle)
+### Bài toán
 
-Hệ thống được thiết kế theo vòng đời Machine Learning khép kín, phân tách minh bạch giữa **Offline ML Pipeline** (Huấn luyện & Đánh giá) và **Online Surveillance Pipeline** (Suy luận & Tác nghiệp thời gian thực):
+Trong công trường hoặc nhà máy, người giám sát cần biết:
 
-```text
-========================================================================================
-                                 OFFLINE ML PIPELINE
-========================================================================================
+1. Người nào đang ở vùng cần kiểm soát.
+2. Người đó có đội mũ và mặc áo phản quang hay chưa.
+3. Vi phạm có kéo dài đủ lâu để cần cảnh báo hay chỉ là lỗi nhận diện tạm thời.
+4. Cảnh báo nào có snapshot và timestamp để người phụ trách kiểm tra lại.
 
-1. DATA INGESTION
-   Raw Construction Images & Surveillance Video Feeds (Full HD / HD 720p)
-          ↓
-2. DATA QA & ANTI-LEAKAGE AUDIT
-   Exact Duplicate Filter (SHA-256) + Near-Duplicate Filter (pHash Hamming distance)
-   Grouping: recording_session; camera/site dùng để kiểm tra domain shift
-          ↓
-3. GROUP-AWARE SPLIT
-   Train (70%) ── Validation (15%) ── Locked Test (15%)
-   Locked test dùng camera/site chưa thấy nếu metadata thật đáp ứng điều kiện
-          ↓
-4. PERSON-CROP GENERATION
-   Person Detector → Person ROI + 10px Fixed Padding Contract → Letterbox 640×640
-          ↓
-5. PPE MODEL TRAINING
-   Candidates: YOLOv8n-PPE vs YOLOv8s-PPE (Classes: helmet, no-helmet, vest, no-vest)
-   Explicit Augmentation Contract (Mild HSV, Translation, Scale, Horizontal Flip)
-          ↓
-6. VALIDATION MODEL SELECTION (Pareto Frontier)
-   Val mAP50-95 + no-helmet Recall + no-vest Recall + p95 Latency Trade-off
-          ↓
-   Chỉ chọn champion sau khi có validation metrics thật
-          ↓
-7. LOCKED FINAL TEST & ARTIFACT VERSIONING
-   Detection Metrics + End-to-End System Metrics → Versioned Artifact Registry
+Đơn vị kết quả chuẩn là:
 
-========================================================================================
-                              ONLINE SURVEILLANCE PIPELINE
-========================================================================================
+worker track -> PPE state -> confirmed violation event
 
-8. PERCEPTION LAYER
-   Surveillance Camera Stream / Video File
-          ↓
-   Person Detector (COCO Class 0, Person Conf: 0.30, NMS IoU: 0.50)
-          ↓
-   Worker Tracking (tracker được khai báo rõ; baseline hiện tại là IoU hai ngưỡng)
-          ↓
-   Tracked Person ROIs (crop có padding 10px; track box vẫn là tọa độ gốc)
-          ↓
-   PPE Detector (PPE Conf: 0.30, 4 classes)
-          ↓
-   Spatial Body-Zone Association theo runtime policy
-          ↓
-9. TEMPORAL INTELLIGENCE LAYER
-   Per-Track PPE Observation Accumulation
-          ↓
-   Temporal Violation FSM (Finite State Machine)
-   [COMPLIANT] ──(ABSENT đủ dwell time)──> [ALERTED] ──(PRESENT đủ dwell time)──> [RESOLVED]
-                                       │
-                                       └──> [RECURRENT VIOLATION]
-          ↓
-10. OPERATIONS & MONITORING LAYER
-   Audit Evidence Snapshot + Sound Alert + JSON Summary + CSV Event Logs + Streamlit Dashboard
-```
+Một quan sát PPE chỉ có giá trị khi gắn với track_id, thời điểm và chính sách
+không gian/thời gian đang được resolve.
 
----
+### Trong phạm vi
 
-## 2. Quyết Định Kiến Trúc Trọng Tâm: Two-Stage Detection
+- Ảnh tĩnh để kiểm tra và vẽ kết quả; ảnh tĩnh không tạo violation event.
+- Video file, webcam index và URI camera mà OpenCV hỗ trợ.
+- Person detection bằng YOLO class 0 trên frame gốc.
+- PPE detection trên person crop với bốn class PPE.
+- ROI tùy chọn và body-zone cho helmet/vest.
+- Tracker baseline nội bộ: TwoThresholdIoUTracker hoặc IoUTracker.
+- Dwell time để xác nhận vi phạm và khắc phục.
+- Snapshot, báo cáo JSON/CSV, CLI và Streamlit dashboard.
+- Manifest ảnh thật, audit hash, group split và tạo person crop sau split.
 
-Thay vì huấn luyện một mô hình detector duy nhất phát hiện toàn bộ trang bị bảo hộ trên khung hình lớn, nền tảng lựa chọn kiến trúc **Two-Stage Detection**:
-1. **Khắc phục độ lệch kích thước vật thể (Scale Invariance)**: Trang bị bảo hộ (mũ, áo) chiếm tỷ lệ rất nhỏ trên ảnh camera công trường góc rộng ($1920 \times 1080$). Việc phát hiện người trước rồi cắt ROI giúp chuẩn hóa kích thước PPE tương đối lớn hơn đáng kể trong không gian đặc trưng.
-2. **Gắn chặt trạng thái an toàn theo từng cá nhân (Per-Worker PPE Attribution)**: Việc chạy detector trực tiếp trên toàn khung hình rất khó gán chính xác chiếc mũ thuộc về ai khi nhiều công nhân đứng gần nhau. Stage-2 cho phép quản lý trạng thái tuân thủ gắn liền với định danh của từng người.
-3. **Liên kết không gian giải phẫu (Spatial Body-Zone Association)**: Giảm lỗi gán nhầm trong cảnh đông người (Crowded Scenes):
-   - Mũ (`helmet`, `no-helmet`) bắt buộc phải nằm ở vùng đầu ($y \le 35\%$ ROI).
-   - Áo (`vest`, `no-vest`) bắt buộc phải nằm ở vùng thân giữa ($30\% \le y \le 75\%$ ROI).
-   - Fixed geometry không loại bỏ hoàn toàn cross-person contamination; đây là một bộ lọc giảm rủi ro.
+### Ngoài phạm vi phiên bản này
 
----
+- Chưa phải implementation ByteTrack chuẩn; tên ByteTrack chỉ còn là alias
+  tương thích ngược, còn policy production dùng two_threshold_iou.
+- Chưa có async queue, multi-camera worker pool, API backend, SQLite review,
+  authentication, object storage hoặc release bundle bất biến.
+- Chưa có benchmark production vì repo không có dữ liệu và weights thật.
+- Không nhận dạng danh tính, face recognition hoặc tự động retrain online.
+- Fixed body-zone chỉ giảm lỗi gán nhầm trong cảnh đông người, không bảo đảm
+  loại bỏ hoàn toàn cross-person contamination.
+- Mũ cầm trên tay, che khuất mạnh, người quá nhỏ, camera rung hoặc góc top-down
+  cần dữ liệu và policy riêng để đánh giá.
 
-## 3. Phân Tách 3 Bài Toán Riêng Biệt & Hệ Đo Lường Độc Lập
+### KPI thiết kế, chưa phải số đo
 
-Một sai lầm phổ biến là dùng chỉ số **PPE mAP** để đại diện cho *"Độ chính xác cảnh báo an toàn của hệ thống"*. Nền tảng phân định rạch ròi 3 bài toán với ma trận chỉ số độc lập:
+| Chỉ số | Mục tiêu ban đầu | Artifact dùng để đo |
+| --- | ---: | --- |
+| Recall no-helmet | >= 90% | PPE locked-test report |
+| Recall no-vest | >= 85% | PPE locked-test report |
+| Event precision | >= 85% | Event interval report |
+| False alerts | <= 2/giờ/camera | Video có ground truth |
+| Time-to-alert | <= 2 giây | GT interval và alert timestamp |
+| Throughput | >= 20 FPS GPU, >= 5 FPS CPU | Benchmark đúng phần cứng |
 
-| Bài toán | Tên bài toán | Đối tượng xử lý | Chỉ số đánh giá cốt lõi | Ý nghĩa thực tế |
-| :--- | :--- | :--- | :--- | :--- |
-| **Problem A** | **Person Detection** | Khung hình gốc Full HD | Precision, Recall, mAP50, mAP50-95 | Ngưỡng chặn trên: $SystemRecall \le PersonRecall$. Bỏ sót người thì PPE không bao giờ được chạy. |
-| **Problem B** | **PPE Recognition** | Vùng ảnh cắt Person ROI | mAP50, mAP50-95, per-class Recall (`no-helmet`, `no-vest`) | Đánh giá năng lực thị giác máy tính nhận biết mũ và áo trong điều kiện ánh sáng/góc nhìn khác nhau. |
-| **Problem C** | **Violation Event Detection** | Chuỗi quan sát thời gian (Temporal Stream) | **Event Precision, Event Recall, False Alerts/Hour, Time-to-Alert** | **Chỉ số nghiệp vụ sống còn**: Hệ thống có cảnh báo đúng vi phạm không? Có bị báo động giả gây ô nhiễm không? |
+Không được ghi các KPI này là kết quả đạt được nếu chưa có report thật.
 
----
+## Quy trình kỹ thuật duy nhất chi phối toàn bộ dự án
 
-## 4. Hợp Đồng Cấu Hình Phân Tách (Decoupled Architecture Contracts)
-
-Các cấu hình hệ thống được tách rời thành 4 hợp đồng kỹ thuật chuẩn tại thư mục `configs/`:
-
-```text
-configs/
-├── dataset_v1.yaml        # DATA CONTRACT: Annotation semantics, crop padding, group split protocol
-├── train_yolov8n.yaml     # TRAINING CONTRACT: Hyperparameters, lr0, lrf, optimizer, augmentations
-├── train_yolov8s.yaml     # CANDIDATE CONTRACT: High-capacity comparative model
-└── runtime_policy.yaml    # INFERENCE & DECISION CONTRACT: Thresholds, FSM rules, body-zone ratios
-```
-
-*Toàn bộ siêu tham số trong `train_yolov8n.yaml` (optimizer `AdamW`, `lr0=0.01`, `lrf=0.01`, augmentations) được chuyển tiếp thực tế vào Ultralytics `model.train()` mà không có tham số chết.*
-
----
-
-## 5. Dữ liệu và chống rò rỉ
-
-Repo không chứa dataset ảnh/video thật. Không có con số mẫu, camera, phân phối
-lớp hay benchmark nào được coi là measured nếu chưa xuất hiện trong artifact
-được tạo từ dữ liệu thật.
-
-Quy trình chuẩn:
-
-```text
-metadata CSV + ảnh/label thật
-    → training/build_manifest.py
-    → SHA-256 bytes ảnh + pHash ảnh đã decode
-    → split theo recording_session; kiểm tra camera/site cho domain shift
-    → audit_dataset.py
-    → PersonCropBuilder (chỉ tạo crop sau split)
-```
-
-Manifest phải có provenance, `frame_id`, `timestamp_ms`, đường dẫn ảnh/label,
-`file_sha256`, `image_phash`, `split` và `annotation_version`. Audit sẽ lỗi nếu
-session bị chia chéo, file thiếu hoặc SHA không khớp. `training/dataset_card.md`
-mô tả đầy đủ hợp đồng này.
-
----
-
-## 6. Tri-state và FSM theo thời gian
-
-Mỗi track có state độc lập cho helmet và vest:
-
-```text
-PRESENT  → bằng chứng tuân thủ
-ABSENT   → bằng chứng vi phạm
-UNKNOWN  → chưa đủ bằng chứng; không được coi là PRESENT
-```
-
-`UNKNOWN` không tăng bộ đếm vi phạm, không tăng bộ đếm tuân thủ và không reset
-event đang mở. Vi phạm chỉ trở thành event khi `ABSENT` kéo dài đủ
-`violation_confirm_seconds`; khắc phục cần `resolution_confirm_seconds`.
-
-FSM cũng thực thi `alert_cooldown_seconds` và dọn state theo
-`track_ttl_seconds`.
+Đây là pipeline chuẩn mà README, cấu hình, mã nguồn, training và báo cáo phải
+cùng tuân theo. Nhánh Offline tạo artifact; nhánh Online dùng model/policy đã
+resolve; nhánh Evaluation chỉ đọc artifact thật và không tự sinh metric.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> COMPLIANT
-    COMPLIANT --> VIOLATING: ABSENT bắt đầu
-    VIOLATING --> ALERTED: ABSENT đủ dwell time
-    ALERTED --> RESOLVED: PRESENT đủ dwell time
-    RESOLVED --> ALERTED: ABSENT đủ dwell time + cooldown
+flowchart TD
+    A[Ảnh hoặc video nguồn thật<br/>kèm provenance] --> B[Metadata + annotation contract]
+    B --> C[Build manifest<br/>SHA-256 ảnh + pHash ảnh đã decode]
+    C --> D[Group split theo recording_session<br/>train / val / locked test]
+    D --> E[Audit file, hash, class, session leakage]
+    E --> F[Person crop sau khi khóa split<br/>PersonCropBuilder + padding]
+    F --> G[PPE training contract<br/>YOLOv8n canonical, YOLOv8s challenger]
+    G --> H[Validation model và policy selection]
+    H --> I[Freeze model + runtime_policy.yaml]
+
+    J[Camera, webcam hoặc video file] --> K[Frame timestamp]
+    K --> L{Đến chu kỳ Person?}
+    L -->|Có| M[YOLO Person class 0]
+    L -->|Không| N[Tracker motion prediction]
+    M --> O[Update track]
+    N --> O
+    O --> P{Đến chu kỳ PPE?}
+    P -->|Không| Q[Giữ track, không tạo PPE evidence]
+    P -->|Có| R[PersonCropBuilder dùng ROI gốc]
+    R --> S[PPE detector trên person crop]
+    S --> T[Map box về person coordinates<br/>và kiểm tra body-zone]
+    T --> U[Tri-state resolver<br/>PRESENT / ABSENT / UNKNOWN]
+    U --> V[Time-based violation FSM]
+    V --> W{Đủ dwell time?}
+    W -->|Không| Q
+    W -->|Có| X[Confirmed event]
+    X --> Y[Snapshot + JSON + CSV + dashboard]
+
+    I --> M
+    I --> S
+    I --> V
+
+    Y --> Z[Human review / offline error analysis]
+    Z -. feedback có kiểm soát .-> B
+
+    AA[GT full-frame + GT tracking + GT event intervals] --> AB[Locked-test evaluators]
+    I --> AB
+    AB --> AC[Detection + tracking + event + runtime report]
 ```
 
----
+### Single source of truth
 
-## 7. Đánh giá và bằng chứng
+- configs/runtime_policy.yaml là nguồn chính cho runtime detector, tracker,
+  body-zone, ROI rule và temporal decision.
+- DetectionConfig.load_from_policy() resolve policy thành cấu hình thực thi.
+  CLI, Streamlit và demo đều nạp policy này; override chỉ dùng cho session/debug
+  và được lưu trong resolved_config của report.
+- configs/dataset_v1.yaml mô tả annotation, crop và split contract.
+- configs/train_yolov8n.yaml là training contract canonical; YOLOv8s là
+  candidate để so sánh ở validation.
+- Báo cáo runtime lưu source, timestamp, config đã resolve, số observation
+  UNKNOWN và các event đã phát.
+- Evaluator production fail closed khi thiếu model, dataset, GT, trajectory,
+  event hoặc duration; demo được đánh dấu synthetic_demo=true.
 
-Evaluator production không có số mặc định. Thiếu weights, annotation, locked
-test, trajectory hoặc duration sẽ làm lệnh lỗi. Demo synthetic được tách ở
-`scripts/demo_pipeline.py` và luôn ghi `synthetic_demo=true`.
+## Luồng logic runtime
 
-Metric headline của hệ thống:
+### 1. Nhận frame và định thời gian
 
-| Tầng | Metric |
-| :--- | :--- |
-| Person | Precision, Recall, mAP50, mAP50-95 |
-| PPE | mAP50-95, no-helmet Recall, no-vest Recall |
-| PPE state | Macro-F1 từng state, UNKNOWN rate |
-| Tracking | IDF1, ID switches, fragmentation, MOTA |
-| Event | Precision, Recall, False Alerts/hour, Time-to-Alert |
-| Runtime | p50/p95 latency, processed FPS, input FPS |
+- Video file dùng timestamp từ CAP_PROP_POS_MSEC; nếu backend không cung cấp
+  thì fallback về frame_id / source_fps.
+- Webcam và URI live (rtsp, rtmp, http, https) dùng monotonic clock.
+- violation_confirm_seconds và resolution_confirm_seconds vì vậy không phụ
+  thuộc trực tiếp vào FPS xử lý.
 
-PPE model được đánh giá trên person crop chuẩn hóa; end-to-end test chạy full
-video qua person detector → tracker → crop → PPE → event. Validation dùng để
-chọn model/policy; locked test chỉ dùng report sau khi mọi artifact đã freeze.
+### 2. Person detection và tracking
 
----
+- Ở frame đến detection_interval, Person model nhận frame gốc với classes=[0].
+- Ở frame còn lại, tracker dự đoán box bằng vận tốc đã làm mượt.
+- TwoThresholdIoUTracker ghép detection confidence cao trước, sau đó dùng
+  detection thấp để cứu track hiện có. Đây là baseline IoU hai ngưỡng, không phải
+  ByteTrack chuẩn.
+- max_missed_detections giới hạn theo chu kỳ Person detector;
+  track_ttl_seconds giới hạn theo thời gian từ lần thấy người cuối.
+- Track chỉ bị xóa khi vượt miss-count hoặc TTL.
 
-## 8. Cấu Trúc Mã Nguồn
+### 3. PPE inspection
+
+- PersonCropBuilder cắt person box với person_roi_padding_px và trả CropWindow.
+- Padding chỉ cung cấp context cho PPE model; hệ tọa độ body-zone vẫn dựa trên
+  person box gốc.
+- PPE detector chạy theo ppe_detection_interval, độc lập với cadence Person.
+- Frame chỉ cập nhật Person/track thì giữ PPE observation gần nhất; frame thực
+  sự inspect nhưng không đủ bằng chứng thì ghi UNKNOWN.
+
+### 4. ROI, body-zone và tri-state
+
+- ROI center kiểm tra tâm box; overlap tính diện tích giao giữa person box và
+  polygon chia cho diện tích person box; center_or_overlap kết hợp hai rule.
+- helmet/no-helmet phải nằm trong head_zone.
+- vest/no-vest phải nằm trong torso_zone.
+- Nếu score vi phạm và score tuân thủ cùng vượt ngưỡng, nhãn chỉ được chấp nhận
+  khi vượt nhãn đối lập ít nhất conflict_margin.
+- PRESENT là bằng chứng tuân thủ đủ mạnh.
+- ABSENT là bằng chứng vi phạm đủ mạnh.
+- UNKNOWN là thiếu bằng chứng hoặc xung đột; không được coi là PRESENT.
+
+### 5. FSM phát hành event
+
+- ABSENT bắt đầu hoặc tiếp tục violation dwell timer.
+- PRESENT bắt đầu resolution dwell timer khi event đã ALERTED.
+- UNKNOWN không tăng bộ đếm nào và không reset event đang mở.
+- Dwell time đạt ngưỡng thì event mới được emit; một track không spam event khi
+  vẫn ở ALERTED.
+- Sau RESOLVED, tái phạm chỉ emit khi cooldown đã kết thúc. Vi phạm bắt đầu
+  trong cooldown vẫn được giữ ở trạng thái chờ và có thể phát khi cooldown hết.
+- clean_inactive_tracks() dọn state FSM theo active track và TTL.
+
+```mermaid
+flowchart TD
+    A[Person track] --> B[PPE observation]
+    B --> C{PPE state}
+    C -->|PRESENT| D[Compliance evidence]
+    C -->|ABSENT| E[Violation dwell timer]
+    C -->|UNKNOWN| F[Giữ state hiện tại<br/>không tăng hoặc reset evidence]
+    E --> G{Đủ violation_confirm_seconds?}
+    G -->|Chưa| H[VIOLATING]
+    G -->|Rồi + cooldown hợp lệ| I[ALERTED + emit event]
+    G -->|Rồi nhưng đang cooldown| H
+    I --> J[PRESENT đủ resolution_confirm_seconds]
+    J --> K[RESOLVED]
+    K --> E
+```
+
+## Luồng dữ liệu offline và hợp đồng manifest
+
+Repo không commit dataset thật. Người thu thập phải cung cấp metadata CSV, ảnh
+và YOLO label. build_manifest.py không tự tạo sample, không tự sinh hash và
+không tự random split.
+
+Metadata đầu vào tối thiểu có các cột:
 
 ```text
-deep-learning-application/
-├── configs/                             # HỢP ĐỒNG CẤU HÌNH HỆ THỐNG
-│   ├── dataset_v1.yaml                  # Data & Annotation contract
-│   ├── train_yolov8n.yaml               # Training contract cho YOLOv8n
-│   ├── train_yolov8s.yaml               # Training contract cho YOLOv8s
-│   └── runtime_policy.yaml              # Runtime policy & decision rules
-├── ppe_detection/                       # SURVEILLANCE RUNTIME ENGINE
-│   ├── config.py                        # Quản lý cấu hình & validation
-│   ├── models.py                        # PPEState tri-state, detection và violation state
-│   ├── crops.py                         # PersonCropBuilder dùng chung train/serve
-│   ├── detector.py                      # Two-Stage detector & body-zone association
-│   ├── tracker.py                       # TwoThresholdIoUTracker và IoU baseline
-│   ├── violation_fsm.py                 # Dwell time, cooldown và TTL
-│   ├── pipeline.py                      # Điều phối luồng xử lý Track-First
-│   ├── reporting.py                     # Báo cáo JSON thống kê & CSV sự kiện
-│   ├── service.py                       # Service layer phân tách session
-│   └── visualization.py                 # HUD, HUD overlay và Bounding Box
-├── training/                            # OFFLINE ML LIFECYCLE
-│   ├── build_manifest.py                # Manifest từ ảnh/annotation thật
-│   ├── build_person_crops.py             # Crop người sau khi khóa split
-│   ├── audit_dataset.py                 # Kiểm tra file, hash và group split
-│   ├── dataset_card.md                  # Dataset Card chuẩn quốc tế
-│   ├── train.py                         # Huấn luyện YOLO nhận đầy đủ tham số contract
-│   ├── evaluate_detector.py             # Đánh giá Layer 1 (PPE) & Layer 2 (Person)
-│   ├── evaluate_tracking.py             # Đánh giá Layer 3 (Tracking: ID switches, IDF1)
-│   ├── evaluate_events.py               # Đánh giá Layer 4 (Violation events matching)
-│   ├── evaluate_system.py               # Tổng hợp từ artifacts, không hard-code
-│   ├── evaluate.py                      # Điểm truy cập đánh giá hợp nhất
-│   └── export.py                        # Xuất mô hình ONNX / TensorRT
-├── scripts/                             # Entry points demo và final evaluation
-│   ├── demo_pipeline.py
-│   └── evaluate_final.py
-├── tests/                               # Kiểm thử tự động
-│   ├── test_config.py
-│   ├── test_edge_cases.py
-│   ├── test_pipeline.py
-│   ├── test_reporting.py
-│   ├── test_tracker.py
-│   ├── test_training_contracts.py       # Kiểm tra forwarding tham số & anti-leakage
-│   ├── test_spatial_association.py      # Kiểm tra body zone & lưu box PPE
-│   ├── test_violation_fsm.py            # Kiểm tra FSM, resolution & recurrence
-│   ├── test_tracking_time_semantics.py  # Kiểm tra tracker hai ngưỡng & motion prediction
-│   └── test_event_evaluation.py         # Kiểm tra matching sự kiện không phụ thuộc ID
-├── app.py                               # CLI Entrypoint
-├── web_app.py                           # Web Dashboard tương tác Streamlit
-├── requirements.txt
-└── pytest.ini
+sample_id,parent_video_id,frame_id,timestamp_ms,
+camera_id,site_id,recording_session,
+image_path,label_path,class_labels,split,
+source_id,annotation_version
 ```
 
----
+split phải là train, val hoặc test và đã được gán ở cấp recording_session trước
+khi tạo crop. Một session không được xuất hiện ở nhiều split.
 
-## 9. Hướng Dẫn Cài Đặt & Sử Dụng
+Manifest đầu ra thêm:
 
-### Cài đặt môi trường
+- file_sha256: SHA-256 của bytes ảnh thật.
+- image_phash: pHash tính từ ảnh đã decode.
+- image_path, label_path: đường dẫn tương đối so với thư mục manifest.
+- Các trường provenance, timestamp, class và split được giữ nguyên.
 
-```bash
-git clone <repository-url>
-cd deep-learning-application
+Sau khi có person bounding box trong manifest (person_x1, person_y1, person_x2,
+person_y2), chạy build_person_crops.py. Script:
+
+1. Đọc ảnh/label thật.
+2. Dùng PersonCropBuilder giống runtime.
+3. Clip PPE label từ full-frame sang crop coordinates.
+4. Ghi images/<split>, labels/<split>.
+5. Tạo manifests/train.txt, val.txt, test.txt để training/data.yaml dùng trực tiếp.
+
+training/audit_dataset.py kiểm tra file tồn tại, hash thực tế, session leakage,
+SHA duplicate, pHash duplicate và class distribution. Audit thất bại sẽ không
+được dùng làm evidence benchmark.
+
+## Đánh giá
+
+Có bốn lớp đánh giá, tách khỏi demo:
+
+| Lớp | Input | Metric chính |
+| --- | --- | --- |
+| Person detection | Full-frame data config + Person weights | Precision, Recall, mAP |
+| PPE detection | Person-crop data config + PPE weights | mAP50, mAP50-95, per-class Recall |
+| Tracking | GT/pred trajectories, box XYXY | IDF1, ID switches, fragmentation, MOTA |
+| Event | GT intervals + predicted events + identity map | Precision, Recall, false alerts/hour, TTA |
+
+Evaluator tracking đổi box nội bộ XYXY sang format MOT XYWH trước khi gọi
+motmetrics. Event evaluator dùng interval start_sec/end_sec và chỉ match theo
+violation_type, timestamp hợp lệ và identity map (hoặc ID trùng nhau khi không
+cung cấp map). Không có identity check lỏng giữa hai worker khác nhau.
+
+Hai mức PPE test cần được phân biệt:
+
+- Model test: PPE model chạy trên canonical person crops.
+- End-to-end locked test: full frame -> Person -> Tracking -> Crop -> PPE -> FSM
+  -> Event.
+
+Không tune threshold hoặc policy sau khi đã xem locked test.
+
+## Cấu trúc thư mục dự án
+
+```text
+PPE-Safety-Monitoring/
+├── .github/workflows/ci.yml          # CI lint, syntax và unit tests
+├── configs/
+│   ├── dataset_v1.yaml               # Data/annotation/split contract
+│   ├── runtime_policy.yaml           # Runtime policy duy nhất
+│   ├── train_yolov8n.yaml            # Model canonical
+│   └── train_yolov8s.yaml            # Validation challenger
+├── docs/
+│   ├── Huong_dan_cai_thien_du_an_PPE_4_tang.docx
+│   └── Tai_lieu_thuyet_minh_PPE_YOLO.docx
+├── ppe_detection/
+│   ├── config.py                     # Load và validate policy
+│   ├── crops.py                      # PersonCropBuilder
+│   ├── detector.py                   # Person/PPE two-stage detection
+│   ├── models.py                     # Dataclass và PPE tri-state
+│   ├── pipeline.py                   # Runtime orchestration
+│   ├── reporting.py                  # JSON/CSV session report
+│   ├── service.py                    # Session-scoped service
+│   ├── tracker.py                    # IoU baselines
+│   ├── violation_fsm.py              # Dwell/cooldown/TTL FSM
+│   └── visualization.py               # HUD và bounding boxes
+├── scripts/
+│   ├── demo_pipeline.py              # Synthetic smoke demo
+│   └── evaluate_final.py             # Locked-test entry point
+├── training/
+│   ├── audit_dataset.py              # Audit manifest thật
+│   ├── build_manifest.py             # Build manifest từ metadata thật
+│   ├── build_person_crops.py         # Crop + remap YOLO labels
+│   ├── data.yaml                     # PPE crop dataset config
+│   ├── dataset_card.md               # Dataset evidence contract
+│   ├── evaluate.py                   # Unified evaluation entry point
+│   ├── evaluate_detector.py          # Person/PPE metrics
+│   ├── evaluate_events.py            # Interval event metrics
+│   ├── evaluate_system.py            # System report composition
+│   ├── evaluate_tracking.py          # motmetrics tracking metrics
+│   ├── export.py                     # ONNX/TensorRT export
+│   └── train.py                      # Training contract runner
+├── tests/                            # Unit and contract tests
+├── app.py                            # CLI
+├── web_app.py                        # Streamlit dashboard
+├── Dockerfile
+├── pyproject.toml                    # Ruff + pytest config
+├── requirements.txt                  # Runtime dependencies
+├── requirements-dev.txt              # Runtime + test/evaluation tools
+├── LICENSE
+└── README.md
+```
+
+Thư mục runtime tạo ra như data/, models/, runs/, outputs/, reports/, .venv/ và
+cache không được commit theo .gitignore.
+
+## Cài đặt
+
+Yêu cầu Python 3.10 trở lên; CI dùng Python 3.11.
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/haminhthong/PPE-Safety-Monitoring.git
+cd PPE-Safety-Monitoring
 python -m venv .venv
-
-# Windows PowerShell:
-.venv\Scripts\Activate.ps1
-# Linux/macOS:
-source .venv/bin/activate
-
-pip install --upgrade pip
-pip install -r requirements.txt
+.venv\\Scripts\\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
-### 1. Chạy demo synthetic
-
-Chế độ demo chạy trực tiếp mà không cần tải trước weights:
+### Linux/macOS
 
 ```bash
-# Demo được tách khỏi đường chạy model/evaluation thật
+git clone https://github.com/haminhthong/PPE-Safety-Monitoring.git
+cd PPE-Safety-Monitoring
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+Chỉ chạy runtime có thể dùng requirements.txt; chạy test, audit tracking và lint
+nên dùng requirements-dev.txt.
+
+## Hướng dẫn chạy thử nghiệm
+
+### Demo synthetic không cần weights
+
+Demo tạo ảnh đen và chạy SyntheticDemoDetector. Kết quả chỉ chứng minh wiring
+của pipeline, không chứng minh độ chính xác model:
+
+```bash
 python scripts/demo_pipeline.py
-
-# Hoặc chạy trực tiếp CLI demo trên ảnh
 python app.py --demo --source tests/sample.jpg --save --no-display
+```
 
-# Chạy Dashboard Streamlit
+Kết quả được ghi vào thư mục session dưới outputs/. Demo luôn được gắn nhãn
+synthetic_demo=true trong thông tin hiển thị/đánh giá liên quan.
+
+### CLI với model thật
+
+Hai weights phải là file thật và phải truyền rõ ràng:
+
+```bash
+python app.py \
+  --source data/surveillance.mp4 \
+  --policy configs/runtime_policy.yaml \
+  --person-model models/yolov8n.pt \
+  --ppe-model models/best.pt \
+  --save \
+  --no-display
+```
+
+Override debug cadence:
+
+```bash
+python app.py --source 0 --person-model models/yolov8n.pt \
+  --ppe-model models/best.pt --person-interval 1 --ppe-interval 4
+```
+
+detect-interval vẫn được giữ như alias cũ của ppe-interval. CLI không tự chuyển
+sang demo khi thiếu model.
+
+### Streamlit dashboard
+
+```bash
 streamlit run web_app.py
 ```
 
-### 2. Xây và kiểm toán manifest thật
+Dashboard mặc định mở demo mode để người dùng có thể thử ngay. Bỏ chọn demo để
+nhập hai model thật. File upload giới hạn 200 MB, được kiểm tra khả năng đọc
+bằng OpenCV và luôn xóa file tạm sau session.
+
+### Build manifest và person crops
 
 ```bash
-# metadata.csv phải do người thu thập cung cấp và split ở cấp session
-python training/build_manifest.py --metadata data/raw/metadata.csv --output data/manifests/dataset.csv
-python training/audit_dataset.py --manifest data/manifests/dataset.csv --output reports/dataset_audit.json
-# Sau khi bổ sung person_x1..person_y2 vào manifest đã audit:
-python training/build_person_crops.py --manifest data/manifests/person_dataset.csv --output-dir data/crops
+python training/build_manifest.py \
+  --metadata data/raw/metadata.csv \
+  --output data/manifests/dataset.csv
+
+python training/audit_dataset.py \
+  --manifest data/manifests/dataset.csv \
+  --output reports/dataset_audit.json
+
+python training/build_person_crops.py \
+  --manifest data/manifests/person_dataset.csv \
+  --output-dir data/dataset_ppe
 ```
 
-### 3. Đánh giá locked test thật
+person_dataset.csv phải có thêm bốn cột person bbox. Lệnh crop sẽ tạo
+data/dataset_ppe/manifests/*.txt, khớp với training/data.yaml.
+
+### Training
+
+```bash
+python training/train.py --config configs/train_yolov8n.yaml
+python training/train.py --config configs/train_yolov8s.yaml
+```
+
+YOLOv8n là model canonical; YOLOv8s chỉ là ứng viên validation. Training ghi
+experiment_env.json và resolved_config.yaml trong runs/train/<experiment>. Không
+coi runs/ là release artifact nếu chưa kiểm tra provenance.
+
+### Evaluation production
+
+PPE và Person phải dùng data config khác nhau. training/data.yaml là PPE
+person-crop config; Person cần một YAML full-frame có class person và được cung
+cấp từ dataset thật.
+
+```bash
+python training/evaluate_detector.py \
+  --ppe-model releases/ppe-monitor-v1/ppe_detector.pt \
+  --person-model releases/ppe-monitor-v1/person_detector.pt \
+  --ppe-data training/data.yaml \
+  --person-data data/person_data.yaml \
+  --split test \
+  --output reports/detector_test.json
+
+python training/evaluate_tracking.py \
+  --gt-tracks reports/gt_tracks.json \
+  --pred-tracks reports/pred_tracks.json \
+  --output reports/tracking_test.json
+
+python training/evaluate_events.py \
+  --gt-events reports/gt_events.json \
+  --pred-events reports/pred_events.json \
+  --gt-to-pred-map reports/gt_to_pred_track_id.json \
+  --duration-hours 1.0 \
+  --output reports/events_test.json
+```
+
+Final evaluation bắt buộc có model, hai data config, GT/pred trajectory, GT/pred
+event interval và duration:
 
 ```bash
 python scripts/evaluate_final.py \
-  --ppe-model releases/ppe-monitor-v1.0.0/ppe_detector.pt \
-  --person-model releases/ppe-monitor-v1.0.0/person_detector.pt \
-  --data training/data.yaml \
+  --ppe-model releases/ppe-monitor-v1/ppe_detector.pt \
+  --person-model releases/ppe-monitor-v1/person_detector.pt \
+  --ppe-data training/data.yaml \
+  --person-data data/person_data.yaml \
   --gt-tracks reports/gt_tracks.json \
   --pred-tracks reports/pred_tracks.json \
   --gt-events reports/gt_events.json \
   --pred-events reports/pred_events.json \
   --gt-to-pred-map reports/gt_to_pred_track_id.json \
-  --duration-hours 1.0
+  --duration-hours 1.0 \
+  --output reports/locked_test_metrics.json
 ```
 
-`--gt-to-pred-map` là ánh xạ identity sinh từ bước đánh giá tracking; có thể
-bỏ qua chỉ khi GT và prediction dùng cùng hệ ID.
+Không dùng --demo cho locked test. Nếu thiếu artifact, lệnh phải dừng lỗi.
+
+### Kiểm thử và CI local
+
+Chạy đúng các gate của GitHub Actions:
 
 ```bash
-# Chạy kiểm thử tự động
-python -m pytest -v
+python -m ruff check .
+python -m compileall -q app.py web_app.py ppe_detection training scripts tests
+python -m pytest
 ```
 
-### 4. Huấn luyện mô hình bằng Training Contract
+Pytest dùng coverage cho package ppe_detection. CI cài toàn bộ
+requirements-dev.txt, sau đó chạy lint, syntax và test.
 
-```bash
-python training/train.py --config configs/train_yolov8n.yaml
+## Báo cáo runtime
+
+Khi --save, mỗi session có thư mục riêng và có thể chứa:
+
+- <source>_detected.mp4 hoặc <source>_detected.jpg
+- <source>_report.json
+- <source>_events.csv
+- snapshots/violation_id<id>_<type>_frame<frame>_<timestamp>.jpg
+
+JSON report lưu:
+
+```json
+{
+  "source": "data/surveillance.mp4",
+  "total_frames": 1200,
+  "unique_people_tracked": 4,
+  "ppe_observations": 300,
+  "unknown_ppe_observations": 12,
+  "resolved_config": {},
+  "violations_summary": {
+    "total": 1,
+    "helmet": 1,
+    "vest": 0,
+    "people": 1
+  },
+  "events": [
+    {
+      "track_id": 7,
+      "violation_type": "helmet",
+      "frame_id": 120,
+      "time_seconds": 4.0,
+      "event_start_seconds": 3.5,
+      "alert_time_seconds": 4.0,
+      "detected_at": "2026-01-01T10:00:00+07:00",
+      "snapshot_path": "snapshots/violation_id7_helmet_frame120_..."
+    }
+  ]
+}
 ```
 
-### 5. Vận hành với model thật
+event_start_seconds là thời điểm bắt đầu bằng chứng vi phạm;
+alert_time_seconds là thời điểm FSM emit event. UNKNOWN chỉ được đếm là
+observation chưa đủ bằng chứng, không được cộng vào violations.
 
-```bash
-# CLI đọc configs/runtime_policy.yaml làm source of truth
-python app.py --source 0 --person-model models/yolov8n.pt --ppe-model models/best.pt --save
+## CI và repo cleanliness
 
-# Chạy với Video file
-python app.py --source data/surveillance.mp4 --person-model models/yolov8n.pt --ppe-model models/best.pt --save
-```
+Workflow .github/workflows/ci.yml chạy trên push/pull request vào main hoặc
+master:
 
----
+1. Checkout source.
+2. Cài Python 3.11.
+3. Cài requirements-dev.txt.
+4. Chạy python -m ruff check ..
+5. Chạy python -m compileall ...
+6. Chạy python -m pytest với coverage.
 
-## 10. Giới Hạn Kiến Trúc & Lộ Trình Phát Triển (Prioritized Roadmap)
+Không tải model hoặc dataset thật trong CI. Test dùng fixture nhỏ hoặc
+SyntheticDemoDetector; demo không được trộn vào metric production.
 
-### Giới hạn hiện tại (Failure Modes)
-- **Extreme Crowd / Occlusion**: Khi công nhân bị che khuất $>70\%$, Person Detector có thể miss dẫn đến PPE Detector không được kích hoạt.
-- **Lighting Extremes**: Bối cảnh ban đêm hoặc ngược sáng mạnh làm suy giảm độ chính xác của lớp áo phản quang không phát quang.
-- **Camera Calibration**: Tỷ lệ phân vùng giải phẫu cơ thể ($35\%$ và $75\%$) hiện giả định góc quay ngang hoặc nghiêng vừa phải (diagonal angle); góc camera từ trên đỉnh đầu chiếu thẳng xuống (top-down bird's-eye view) cần ma trận chiếu riêng.
+Repo sạch bao gồm:
 
-### Lộ trình ưu tiên
-- [x] P0: Runtime policy được nạp đầy đủ; thiếu model/policy thì fail closed.
-- [x] P0: PPE state là PRESENT/ABSENT/UNKNOWN; FSM dùng dwell time, cooldown và TTL.
-- [x] P0: Bỏ manifest tổng hợp và benchmark hard-code khỏi production story.
-- [x] P1: Hash ảnh thật, split theo session trước crop và evaluator interval event.
-- [ ] P1: Tích hợp implementation ByteTrack chuẩn và tracking annotations thật.
-- [ ] P1: Bổ sung locked test, benchmark person/PPE/event/runtime từ dữ liệu thật.
-- [ ] P2: Release bundle bất biến, hash model/policy/dataset và startup integrity gate.
-- [ ] P2: SQLite event/review workflow và retention policy cho evidence.
-- [ ] P3: Monitoring camera health, UNKNOWN rate và drift theo camera/site.
+- Không commit model, dataset, output, run hoặc cache.
+- Chỉ còn một bộ training config ở configs/.
+- Không còn manifest synthetic giả trong production.
+- Không còn Markdown cũ trùng với README; training/dataset_card.md được giữ vì
+  là data contract riêng.
+- Không có pytest.ini cạnh tranh với pyproject.toml.
+- Không dùng path tài khoản cá nhân trong source/config.
+- Mọi thay đổi logic phải cập nhật test và README tương ứng.
 
----
+## Giới hạn và lộ trình
 
-## Giấy Phép (License)
+Đã hoàn thiện trong baseline:
 
-Mã nguồn được phân phối dưới giấy phép [MIT License](LICENSE).
-Mô hình YOLOv8 tuân theo chính sách cấp phép của Ultralytics.
+- Runtime policy được nạp bằng một loader chung ở CLI, Web và demo.
+- PPE state chuyển sang PRESENT / ABSENT / UNKNOWN.
+- FSM dùng dwell time, cooldown và track TTL.
+- Person/PPE cadence tách biệt; timestamp live và video được xử lý khác nhau.
+- Crop training và serving dùng chung PersonCropBuilder.
+- Manifest dùng SHA ảnh thật, pHash ảnh decode và group split.
+- Evaluation không còn hard-coded benchmark hoặc fallback metric giả.
+- Tracking metric dùng motmetrics và chuẩn hóa format box.
+- CI có lint, compile và test.
+
+Các bước cần dữ liệu/hạ tầng thật:
+
+- Tích hợp implementation ByteTrack chuẩn nếu baseline IoU không đạt yêu cầu.
+- Bổ sung full-frame Person dataset và GT tracking/event interval.
+- Chọn model/policy bằng validation; locked test chỉ dùng báo cáo cuối.
+- Tạo release bundle có hash model, policy, dataset và class map.
+- Thêm event repository, human review, retention/privacy control.
+- Thêm monitoring camera health, latency, FPS, UNKNOWN rate và drift.
+
+## Giấy phép
+
+Mã nguồn dùng MIT License. Ultralytics, PyTorch, OpenCV, Streamlit và các
+dependency khác tuân theo giấy phép tương ứng của từng dự án.
