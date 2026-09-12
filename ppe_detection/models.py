@@ -99,8 +99,6 @@ class ViolationState:
     """
 
     state: str = "COMPLIANT"
-    consecutive_positive: int = 0
-    consecutive_negative: int = 0
     started_at_frame: int = 0
     started_at_sec: float = 0.0
     last_seen_sec: float = 0.0

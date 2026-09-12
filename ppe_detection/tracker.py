@@ -1,11 +1,11 @@
-"""Module theo dõi đối tượng với baseline IoU hai ngưỡng.
+"""Module theo dõi đối tượng (Multi-Object Tracking) bằng Two-Threshold IoU và Greedy IoU.
 
-Duy trì định danh ID ổn định và dự đoán chuyển động mượt mà (Motion Prediction) qua các khung hình:
-- `TwoThresholdIoUTracker`: baseline nội bộ phân tách high/low confidence.
-  Đây không phải implementation ByteTrack chuẩn của Ultralytics.
-- `IoUTracker`: Thuật toán tham lam cổ điển (Greedy IoU) giữ làm baseline nhẹ.
-- Hỗ trợ cập nhật chuyển động giữa các frame không chạy detector (chống hiện tượng freeze box).
-- Chuẩn hóa ngữ nghĩa thời gian: `max_missed_detections` (chu kỳ detector) và `track_ttl_seconds`.
+Duy trì định danh ID của từng công nhân qua các khung hình video và dự đoán vị trí
+khi khung hình không chạy detector để tiết kiệm tài nguyên tính toán:
+- `TwoThresholdIoUTracker`: Ghép cặp 2 giai đoạn (high-confidence match trước, sau đó
+  dùng low-confidence detections để phục hồi các track bị che khuất).
+- `IoUTracker`: Ghép cặp tham lam (Greedy IoU) nhẹ nhàng làm baseline.
+- Quản lý vòng đời track qua số chu kỳ mất dấu (`max_missed`) và TTL (`track_ttl_seconds`).
 """
 
 from __future__ import annotations
@@ -22,15 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def iou(box_a: list[float], box_b: list[float]) -> float:
-    """Tính tỉ lệ phần giao trên phần hợp (Intersection over Union) của 2 bounding box.
-
-    Args:
-        box_a: Tọa độ [x1, y1, x2, y2] của khung A.
-        box_b: Tọa độ [x1, y1, x2, y2] của khung B.
-
-    Returns:
-        Giá trị IoU nằm trong khoảng [0.0, 1.0].
-    """
+    """Tính tỷ lệ phần giao trên phần hợp (Intersection over Union) giữa 2 bounding box."""
     x1 = max(box_a[0], box_b[0])
     y1 = max(box_a[1], box_b[1])
     x2 = min(box_a[2], box_b[2])
@@ -45,13 +37,7 @@ def iou(box_a: list[float], box_b: list[float]) -> float:
 
 
 def _keep_previous_ppe(previous: PPEStatus, current: PPEStatus) -> PPEStatus:
-    """Giữ bằng chứng PPE gần nhất cho phần chưa được kiểm tra ở frame này.
-
-    Person tracking và PPE inspection có cadence khác nhau. Một detection người
-    không kèm PPE observation không được phép biến trạng thái đã biết thành
-    ``UNKNOWN``. Nếu caller chỉ cập nhật một loại PPE, loại còn lại cũng được
-    giữ nguyên để tránh làm mất evidence hợp lệ.
-    """
+    """Giữ bằng chứng PPE gần nhất cho phần chưa được kiểm tra ở frame hiện tại."""
     helmet_observed = (
         current.helmet_state is not PPEState.UNKNOWN
         or bool(current.helmet_evidence)
@@ -86,7 +72,7 @@ def _keep_previous_ppe(previous: PPEStatus, current: PPEStatus) -> PPEStatus:
 def _smooth_velocity(
     previous: Track, new_box: list[float], timestamp_sec: float | None
 ) -> list[float]:
-    """Ước lượng vận tốc theo giây khi tracker nhận timestamp."""
+    """Ước lượng vận tốc dịch chuyển tuyến tính mượt mà."""
     elapsed = 1.0
     if timestamp_sec is not None:
         previous_time = previous.last_position_sec
@@ -94,25 +80,13 @@ def _smooth_velocity(
             previous_time = previous.last_seen_sec
         if previous_time is not None:
             elapsed = max(timestamp_sec - previous_time, 1e-6)
-    observed_velocity = [(new_box[index] - previous.box[index]) / elapsed for index in range(4)]
-    return [0.7 * previous.velocity[index] + 0.3 * observed_velocity[index] for index in range(4)]
+    observed_velocity = [(new_box[i] - previous.box[i]) / elapsed for i in range(4)]
+    return [0.7 * previous.velocity[i] + 0.3 * observed_velocity[i] for i in range(4)]
 
 
 @dataclass
 class Track:
-    """Đại diện cho trạng thái của một cá nhân đang được hệ thống theo dõi.
-
-    Attributes:
-        track_id: Mã ID định danh duy nhất của người.
-        box: Tọa độ bounding box hiện tại [x1, y1, x2, y2].
-        ppe: Trạng thái kiểm tra PPE hiện tại.
-        confidence: Độ tin cậy phát hiện.
-        disappeared: Số chu kỳ detector liên tiếp không thấy đối tượng (missed detections).
-        updated: Cờ xác định vết này có được cập nhật quan sát ở frame hiện tại không.
-        velocity: Vector vận tốc ước lượng [vx1, vy1, vx2, vy2] phục vụ nội suy chuyển động.
-        total_observations: Tổng số lần đối tượng được phát hiện và cập nhật.
-        last_position_sec: Thời điểm cuối cùng box được cập nhật, kể cả bằng dự đoán.
-    """
+    """Đại diện cho trạng thái của một người đang được hệ thống theo dõi."""
 
     track_id: int
     box: list[float]
@@ -126,12 +100,12 @@ class Track:
     last_position_sec: float | None = None
 
     def predict_next_box(self, elapsed_sec: float = 1.0) -> list[float]:
-        """Dự đoán vị trí tiếp theo bằng mô hình vận tốc tuyến tính mượt mà."""
-        return [self.box[index] + self.velocity[index] * elapsed_sec for index in range(4)]
+        """Dự đoán vị trí tiếp theo bằng vận tốc tuyến tính."""
+        return [self.box[i] + self.velocity[i] * elapsed_sec for i in range(4)]
 
 
 class TrackerProtocol(Protocol):
-    """Protocol chuẩn cho các tracker."""
+    """Protocol cho các tracker."""
 
     def update(
         self, detections: list[PersonDetection], timestamp_sec: float | None = None
@@ -143,42 +117,35 @@ class TrackerProtocol(Protocol):
 
 
 class IoUTracker:
-    """Bộ theo dõi đối tượng dựa trên thuật toán ghép cặp Greedy IoU (Baseline)."""
+    """Bộ theo dõi đối tượng dựa trên thuật toán tham lam Greedy IoU (Baseline nhẹ)."""
 
     def __init__(
         self,
-        threshold: float = 0.3,
-        max_disappeared: int = 30,
-        track_ttl_seconds: float | None = None,
+        threshold: float = 0.5,
+        max_missed: int = 30,
+        track_ttl_seconds: float | None = 5.0,
     ) -> None:
-        """Khởi tạo IoU Tracker.
-
-        Args:
-            threshold: Ngưỡng IoU tối thiểu để coi là cùng một đối tượng.
-            max_disappeared: Số chu kỳ detector bỏ lỡ tối đa trước khi xóa ID.
-        """
         self.threshold = threshold
-        self.max_disappeared = max_disappeared
+        self.max_missed = max_missed
         self.track_ttl_seconds = track_ttl_seconds
         self.next_id = 1
         self.tracks: dict[int, Track] = {}
 
     def predict(self, timestamp_sec: float | None = None) -> list[Track]:
-        """Dự đoán vị trí ở frame không chạy detector để tránh freeze box."""
+        """Dự đoán vị trí ở khung hình không chạy detector để tránh hiện tượng đứng hình."""
         for track_id in list(self.tracks):
             track = self.tracks[track_id]
             elapsed_sec = 1.0
             if timestamp_sec is not None:
-                previous_time = track.last_position_sec
-                if previous_time is None:
-                    previous_time = track.last_seen_sec
-                if previous_time is not None:
-                    elapsed_sec = max(timestamp_sec - previous_time, 0.0)
+                prev_t = track.last_position_sec or track.last_seen_sec
+                if prev_t is not None:
+                    elapsed_sec = max(timestamp_sec - prev_t, 0.0)
             if track.velocity != [0.0, 0.0, 0.0, 0.0]:
                 track.box = track.predict_next_box(elapsed_sec)
             if timestamp_sec is not None:
                 track.last_position_sec = timestamp_sec
             track.updated = False
+
             if (
                 timestamp_sec is not None
                 and track.last_seen_sec is not None
@@ -191,7 +158,7 @@ class IoUTracker:
     def update(
         self, detections: list[PersonDetection], timestamp_sec: float | None = None
     ) -> list[Track]:
-        """Cập nhật vị trí vết theo dõi dựa trên danh sách detection ở khung hình mới."""
+        """Cập nhật vết theo dõi từ các detection ở khung hình mới."""
         if not detections:
             for track_id in list(self.tracks):
                 track = self.tracks[track_id]
@@ -203,7 +170,7 @@ class IoUTracker:
                     and self.track_ttl_seconds is not None
                     and timestamp_sec - track.last_seen_sec > self.track_ttl_seconds
                 )
-                if track.disappeared > self.max_disappeared or expired:
+                if track.disappeared > self.max_missed or expired:
                     del self.tracks[track_id]
             return self.active_tracks()
 
@@ -224,9 +191,7 @@ class IoUTracker:
             tid = track_ids[row]
             det = detections[col]
 
-            # Tính vector dịch chuyển làm vận tốc mượt mà
             velocity = _smooth_velocity(self.tracks[tid], det.box, timestamp_sec)
-
             self.tracks[tid] = Track(
                 track_id=tid,
                 box=det.box,
@@ -236,14 +201,12 @@ class IoUTracker:
                 updated=True,
                 velocity=velocity,
                 total_observations=self.tracks[tid].total_observations + 1,
-                last_seen_sec=(
-                    timestamp_sec if timestamp_sec is not None else self.tracks[tid].last_seen_sec
-                ),
-                last_position_sec=(
-                    timestamp_sec
-                    if timestamp_sec is not None
-                    else self.tracks[tid].last_position_sec
-                ),
+                last_seen_sec=timestamp_sec
+                if timestamp_sec is not None
+                else self.tracks[tid].last_seen_sec,
+                last_position_sec=timestamp_sec
+                if timestamp_sec is not None
+                else self.tracks[tid].last_position_sec,
             )
             matched_tracks.add(tid)
             matched_detections.add(col)
@@ -251,7 +214,7 @@ class IoUTracker:
             scores[row, :] = -1.0
             scores[:, col] = -1.0
 
-        # Tạo mới các track chưa khớp
+        # Khởi tạo track mới cho các detection chưa ghép cặp
         for col, det in enumerate(detections):
             if col not in matched_detections:
                 tid = self.next_id
@@ -268,76 +231,61 @@ class IoUTracker:
                 )
                 matched_tracks.add(tid)
 
-        # Xóa các track quá hạn
+        # Xử lý các track không được match
         for tid in track_ids:
             if tid not in matched_tracks:
                 track = self.tracks[tid]
                 track.disappeared += 1
                 track.updated = False
-                if track.disappeared > self.max_disappeared:
+                expired = (
+                    timestamp_sec is not None
+                    and track.last_seen_sec is not None
+                    and self.track_ttl_seconds is not None
+                    and timestamp_sec - track.last_seen_sec > self.track_ttl_seconds
+                )
+                if track.disappeared > self.max_missed or expired:
                     del self.tracks[tid]
-
-        for track_id in list(self.tracks):
-            track = self.tracks[track_id]
-            if (
-                timestamp_sec is not None
-                and track.last_seen_sec is not None
-                and self.track_ttl_seconds is not None
-                and timestamp_sec - track.last_seen_sec > self.track_ttl_seconds
-            ):
-                del self.tracks[track_id]
 
         return self.active_tracks()
 
     def active_tracks(self) -> list[Track]:
-        """Trả về danh sách các track còn hiệu lực sắp xếp theo ID tăng dần."""
         return [self.tracks[tid] for tid in sorted(self.tracks)]
 
 
 class TwoThresholdIoUTracker:
-    """Baseline IoU hai ngưỡng, không gọi nhầm là ByteTrack chuẩn."""
+    """Tracker IoU hai ngưỡng phân tách high-confidence và low-confidence detections."""
 
     def __init__(
         self,
-        high_threshold: float = 0.5,
-        match_threshold: float = 0.6,
-        low_match_threshold: float = 0.4,
-        max_missed_detections: int = 30,
-        track_ttl_seconds: float | None = None,
+        high_threshold: float = 0.50,
+        match_threshold: float = 0.50,
+        low_match_threshold: float = 0.30,
+        max_missed: int = 30,
+        track_ttl_seconds: float | None = 5.0,
     ) -> None:
-        """Khởi tạo baseline IoU hai ngưỡng.
-
-        Args:
-            high_threshold: Ngưỡng phân tách detection độ tin cậy cao và thấp.
-            match_threshold: Ngưỡng IoU ghép cặp giai đoạn 1 (high-score).
-            low_match_threshold: Ngưỡng IoU ghép cặp giai đoạn 2 cho đối tượng bị che.
-            max_missed_detections: Số chu kỳ detector tối đa giữ track trước khi xóa.
-        """
         self.high_threshold = high_threshold
         self.match_threshold = match_threshold
         self.low_match_threshold = low_match_threshold
-        self.max_missed_detections = max_missed_detections
+        self.max_missed = max_missed
         self.track_ttl_seconds = track_ttl_seconds
-        self.max_disappeared = max_missed_detections  # Alias tương thích ngược
         self.next_id = 1
         self.tracks: dict[int, Track] = {}
 
     def predict(self, timestamp_sec: float | None = None) -> list[Track]:
-        """Nội suy chuyển động giữa các frame không chạy detector."""
+        """Nội suy chuyển động giữa các frame không chạy person detector."""
         for track_id in list(self.tracks):
             track = self.tracks[track_id]
             elapsed_sec = 1.0
             if timestamp_sec is not None:
-                previous_time = track.last_position_sec
-                if previous_time is None:
-                    previous_time = track.last_seen_sec
-                if previous_time is not None:
-                    elapsed_sec = max(timestamp_sec - previous_time, 0.0)
+                prev_t = track.last_position_sec or track.last_seen_sec
+                if prev_t is not None:
+                    elapsed_sec = max(timestamp_sec - prev_t, 0.0)
             if track.velocity != [0.0, 0.0, 0.0, 0.0]:
                 track.box = track.predict_next_box(elapsed_sec)
             if timestamp_sec is not None:
                 track.last_position_sec = timestamp_sec
             track.updated = False
+
             if (
                 timestamp_sec is not None
                 and track.last_seen_sec is not None
@@ -353,16 +301,16 @@ class TwoThresholdIoUTracker:
         """Cập nhật tracker qua 2 giai đoạn ghép cặp."""
         if not detections:
             for tid in list(self.tracks):
-                self.tracks[tid].disappeared += 1
-                self.tracks[tid].updated = False
                 track = self.tracks[tid]
+                track.disappeared += 1
+                track.updated = False
                 expired = (
                     timestamp_sec is not None
                     and track.last_seen_sec is not None
                     and self.track_ttl_seconds is not None
                     and timestamp_sec - track.last_seen_sec > self.track_ttl_seconds
                 )
-                if track.disappeared > self.max_missed_detections or expired:
+                if track.disappeared > self.max_missed or expired:
                     del self.tracks[tid]
             return self.active_tracks()
 
@@ -395,23 +343,19 @@ class TwoThresholdIoUTracker:
                     updated=True,
                     velocity=velocity,
                     total_observations=self.tracks[tid].total_observations + 1,
-                    last_seen_sec=(
-                        timestamp_sec
-                        if timestamp_sec is not None
-                        else self.tracks[tid].last_seen_sec
-                    ),
-                    last_position_sec=(
-                        timestamp_sec
-                        if timestamp_sec is not None
-                        else self.tracks[tid].last_position_sec
-                    ),
+                    last_seen_sec=timestamp_sec
+                    if timestamp_sec is not None
+                    else self.tracks[tid].last_seen_sec,
+                    last_position_sec=timestamp_sec
+                    if timestamp_sec is not None
+                    else self.tracks[tid].last_position_sec,
                 )
                 matched_tracks.add(tid)
                 matched_high_dets.add(col)
                 scores1[row, :] = -1.0
                 scores1[:, col] = -1.0
 
-        # Giai đoạn 2: ghép detection điểm thấp với track chưa được ghép.
+        # Giai đoạn 2: Ghép detection điểm thấp với track chưa được ghép (phục hồi khi bị che khuất)
         unmatched_tracks = [tid for tid in track_ids if tid not in matched_tracks]
         if unmatched_tracks and low_dets:
             scores2 = np.array(
@@ -436,16 +380,12 @@ class TwoThresholdIoUTracker:
                     updated=True,
                     velocity=velocity,
                     total_observations=self.tracks[tid].total_observations + 1,
-                    last_seen_sec=(
-                        timestamp_sec
-                        if timestamp_sec is not None
-                        else self.tracks[tid].last_seen_sec
-                    ),
-                    last_position_sec=(
-                        timestamp_sec
-                        if timestamp_sec is not None
-                        else self.tracks[tid].last_position_sec
-                    ),
+                    last_seen_sec=timestamp_sec
+                    if timestamp_sec is not None
+                    else self.tracks[tid].last_seen_sec,
+                    last_position_sec=timestamp_sec
+                    if timestamp_sec is not None
+                    else self.tracks[tid].last_position_sec,
                 )
                 matched_tracks.add(tid)
                 scores2[row, :] = -1.0
@@ -468,7 +408,7 @@ class TwoThresholdIoUTracker:
                 )
                 matched_tracks.add(tid)
 
-        # Cập nhật số chu kỳ detector bỏ lỡ và xóa track quá hạn
+        # Cập nhật số chu kỳ bỏ lỡ và xóa track quá hạn
         for tid in track_ids:
             if tid not in matched_tracks:
                 track = self.tracks[tid]
@@ -480,14 +420,10 @@ class TwoThresholdIoUTracker:
                     and self.track_ttl_seconds is not None
                     and timestamp_sec - track.last_seen_sec > self.track_ttl_seconds
                 )
-                if track.disappeared > self.max_missed_detections or expired:
+                if track.disappeared > self.max_missed or expired:
                     del self.tracks[tid]
 
         return self.active_tracks()
 
     def active_tracks(self) -> list[Track]:
         return [self.tracks[tid] for tid in sorted(self.tracks)]
-
-
-# Tên cũ giữ để code bên ngoài không hỏng; production dùng tên chính xác ở trên.
-ByteTrack = TwoThresholdIoUTracker

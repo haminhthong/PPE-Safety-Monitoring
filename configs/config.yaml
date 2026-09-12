@@ -1,0 +1,37 @@
+# Cấu hình hệ thống Giám sát Trang bị Bảo hộ (PPE Safety Monitoring)
+
+model:
+  image_size: 640
+  person_confidence: 0.30
+  ppe_confidence: 0.30
+  nms_iou: 0.50
+
+tracking:
+  tracker_type: "two_threshold_iou"  # "two_threshold_iou" hoặc "iou"
+  high_threshold: 0.50                # Ngưỡng tin cậy cao cho ghép cặp giai đoạn 1
+  iou_threshold: 0.50                 # Ngưỡng IoU ghép cặp vết theo dõi
+  low_match_threshold: 0.30           # Ngưỡng IoU phục hồi đối tượng bị che ở giai đoạn 2
+  max_missed: 30                      # Số chu kỳ mất dấu tối đa trước khi xóa track
+  track_ttl_seconds: 5.0              # Thời gian sống tối đa của track sau khi biến mất
+
+ppe:
+  inspection_interval: 4              # Kiểm tra PPE mỗi N frame (tiết kiệm tài nguyên)
+  person_padding_px: 10               # Padding khi cắt crop người
+  head_zone: [0.00, 0.35]             # Vùng đầu (y-ratio): 0% - 35% chiều cao người
+  torso_zone: [0.30, 0.75]            # Vùng thân (y-ratio): 30% - 75% chiều cao người
+
+alert:
+  violation_seconds: 0.5              # Thời gian vi phạm liên tục để phát cảnh báo
+  resolution_seconds: 1.0             # Thời gian tuân thủ liên tục để xác nhận khắc phục
+  cooldown_seconds: 10.0              # Thời gian chờ trước khi cảnh báo tái phạm cùng một người
+  conflict_margin: 0.10               # Chênh lệch độ tin cậy để giải quyết nhãn xung đột
+  roi_rule: "center_or_overlap"       # Quy tắc kiểm tra ROI: "center", "overlap", hoặc "center_or_overlap"
+  roi_overlap_threshold: 0.40         # Tỷ lệ diện tích giao tối thiểu với đa giác ROI
+  roi_polygon: null                   # Danh sách [[x, y], ...] hoặc null (không giới hạn ROI)
+
+output:
+  output_dir: "outputs"
+  save_output: true
+  save_snapshots: true
+  show_window: true
+  enable_beep: true

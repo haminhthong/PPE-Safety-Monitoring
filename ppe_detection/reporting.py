@@ -128,7 +128,6 @@ class SessionReport:
 
         payload = {
             "source": self.source,
-            "synthetic_demo": bool(self.resolved_config.get("demo_mode", False)),
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "total_frames": self.total_frames,

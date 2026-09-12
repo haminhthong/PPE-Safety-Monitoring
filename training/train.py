@@ -1,4 +1,4 @@
-"""Huấn luyện YOLO PPE và ghi metadata thí nghiệm."""
+"""Huấn luyện mô hình YOLO PPE và ghi nhận metadata thí nghiệm."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from typing import Any
 
 import torch
 import yaml
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("train")
@@ -31,14 +35,13 @@ def get_git_commit() -> str:
 
 
 def record_environment_metadata(
-    config_path: Path, output_dir: Path, resolved_cfg: dict[str, Any]
+    output_dir: Path, resolved_cfg: dict[str, Any]
 ) -> dict[str, Any]:
-    """Ghi metadata môi trường và cấu hình huấn luyện đã giải quyết."""
+    """Ghi metadata môi trường và cấu hình huấn luyện."""
     import ultralytics
 
     metadata = {
         "timestamp": datetime.now().isoformat(),
-        "config_file": str(config_path),
         "python_version": sys.version,
         "platform": platform.platform(),
         "torch_version": torch.__version__,
@@ -46,7 +49,7 @@ def record_environment_metadata(
         "cuda_available": torch.cuda.is_available(),
         "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
         "git_commit": get_git_commit(),
-        "resolved_training_contract": resolved_cfg,
+        "training_config": resolved_cfg,
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,17 +61,17 @@ def record_environment_metadata(
     with open(resolved_cfg_file, "w", encoding="utf-8") as f:
         yaml.safe_dump(resolved_cfg, f, sort_keys=False, allow_unicode=True)
 
-    LOGGER.info("Ghi nhận metadata thí nghiệm và cấu hình giải quyết tại: %s", output_dir)
+    LOGGER.info("Ghi nhận metadata thí nghiệm tại: %s", output_dir)
     return metadata
 
 
 def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Trích xuất và kiểm tra toàn bộ tham số huấn luyện thực tế từ Training Contract."""
-    exp_name = cfg.get("experiment_name", "yolov8n_ppe_exp")
-    data_cfg = cfg.get("data_config", "training/data.yaml")
-    epochs = int(cfg.get("epochs", 100))
-    imgsz = int(cfg.get("image_size", 640))
-    batch = int(cfg.get("batch_size", 16))
+    """Trích xuất tham số huấn luyện cho YOLO."""
+    exp_name = cfg.get("experiment_name", "yolov8n_ppe")
+    data_cfg = cfg.get("data", "training/data.yaml")
+    epochs = int(cfg.get("epochs", 50))
+    imgsz = int(cfg.get("imgsz", cfg.get("image_size", 640)))
+    batch = int(cfg.get("batch", cfg.get("batch_size", 16)))
     seed = int(cfg.get("seed", 42))
 
     train_kwargs: dict[str, Any] = {
@@ -82,7 +85,6 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
         "exist_ok": True,
     }
 
-    # Chuyển tiếp các siêu tham số tối ưu hóa nếu được cấu hình
     for opt_param in (
         "optimizer",
         "lr0",
@@ -90,8 +92,6 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
         "momentum",
         "weight_decay",
         "warmup_epochs",
-        "warmup_momentum",
-        "warmup_bias_lr",
     ):
         if opt_param in cfg:
             train_kwargs[opt_param] = cfg[opt_param]
@@ -100,37 +100,44 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     if device != "auto":
         train_kwargs["device"] = device
 
-    # Chuyển tiếp chính sách data augmentation chuyên biệt cho PPE
-    augs = cfg.get("augmentations", {})
-    if isinstance(augs, dict):
-        for aug_name, aug_val in augs.items():
-            train_kwargs[aug_name] = aug_val
-
     return train_kwargs
 
 
-def train_model(config_file: str) -> None:
-    """Thực thi huấn luyện YOLO dựa trên file cấu hình Training Contract YAML."""
+def train_model(
+    data: str = "training/data.yaml",
+    model_type: str = "yolov8n.pt",
+    epochs: int = 50,
+    batch: int = 16,
+    imgsz: int = 640,
+    config_file: str | None = None,
+) -> None:
+    """Thực thi huấn luyện YOLO PPE."""
     from ultralytics import YOLO
 
-    cfg_path = Path(config_file)
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file cấu hình: {config_file}")
+    cfg: dict[str, Any] = {
+        "data": data,
+        "model_type": model_type,
+        "epochs": epochs,
+        "batch": batch,
+        "imgsz": imgsz,
+    }
 
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    if config_file and Path(config_file).exists():
+        with open(config_file, encoding="utf-8") as f:
+            file_cfg = yaml.safe_load(f) or {}
+            cfg.update(file_cfg)
 
-    exp_name = cfg.get("experiment_name", "yolov8n_ppe_exp")
+    exp_name = cfg.get("experiment_name", "yolov8n_ppe")
     output_dir = Path("runs") / "train" / exp_name
-    record_environment_metadata(cfg_path, output_dir, cfg)
+    record_environment_metadata(output_dir, cfg)
 
-    model_type = cfg.get("model_type", "yolov8n.pt")
-    LOGGER.info("Khởi tạo mô hình %s...", model_type)
-    model = YOLO(model_type)
+    actual_model = cfg.get("model_type", model_type)
+    LOGGER.info("Khởi tạo mô hình %s...", actual_model)
+    model = YOLO(actual_model)
 
     train_kwargs = build_train_kwargs(cfg)
     LOGGER.info(
-        "Bắt đầu huấn luyện mô hình [%s] trong %d epochs với tham số đã ánh xạ:",
+        "Bắt đầu huấn luyện mô hình [%s] trong %d epochs:",
         exp_name,
         train_kwargs["epochs"],
     )
@@ -143,13 +150,22 @@ def train_model(config_file: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Script huấn luyện YOLO PPE")
-    parser.add_argument(
-        "--config",
-        default="configs/train_yolov8n.yaml",
-        help="Đường dẫn tới file cấu hình YAML Training Contract",
-    )
+    parser.add_argument("--data", default="training/data.yaml", help="Đường dẫn file data.yaml")
+    parser.add_argument("--model", default="yolov8n.pt", help="Mô hình base (yolov8n.pt, etc.)")
+    parser.add_argument("--epochs", type=int, default=50, help="Số epochs")
+    parser.add_argument("--batch", type=int, default=16, help="Batch size")
+    parser.add_argument("--imgsz", type=int, default=640, help="Kích thước ảnh")
+    parser.add_argument("--config", default=None, help="File cấu hình YAML (tùy chọn)")
     args = parser.parse_args()
-    train_model(args.config)
+
+    train_model(
+        data=args.data,
+        model_type=args.model,
+        epochs=args.epochs,
+        batch=args.batch,
+        imgsz=args.imgsz,
+        config_file=args.config,
+    )
 
 
 if __name__ == "__main__":

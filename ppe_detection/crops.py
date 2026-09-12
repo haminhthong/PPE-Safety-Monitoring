@@ -1,4 +1,4 @@
-"""Hợp đồng cắt ROI người dùng chung cho train, evaluation và serving."""
+"""Tiện ích cắt ROI người cho pipeline và training."""
 
 from __future__ import annotations
 

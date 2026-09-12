@@ -1,0 +1,17 @@
+.git
+.gitignore
+.github
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.ruff_cache
+.tmp_pytest
+outputs
+runs
+data
+models/*.pt
+docs
+*.docx
+*.zip

@@ -1,7 +1,7 @@
 """Module dịch vụ trung gian (DetectionService) phân tách Backend Inference khỏi CLI và UI.
 
 Tạo cấu trúc lưu trữ đầu ra độc lập theo từng phiên làm việc (Session-based output)
-và cung cấp giao diện lập trình xử lý ảnh/video an toàn.
+và cung cấp giao diện xử lý ảnh/video mượt mà.
 """
 
 from __future__ import annotations
@@ -35,20 +35,7 @@ class DetectionService:
         self.config = dataclasses.replace(config, output_dir=self.session_dir)
 
     def process(self, source: int | str) -> tuple[SessionReport, Path]:
-        """Thực thi pipeline trên nguồn dữ liệu và trả về báo cáo cùng đường dẫn thư mục phiên.
-
-        Args:
-            source: Đường dẫn tới file ảnh/video hoặc chỉ số camera.
-
-        Returns:
-            Tuple chứa (SessionReport, Path thư mục lưu trữ phiên).
-        """
-        if self.config.demo_mode:
-            LOGGER.warning(
-                "[DEMO MODE ACTIVE]: Kết quả mô phỏng bởi SyntheticDemoDetector, "
-                "không phải inference AI thật."
-            )
-
+        """Thực thi pipeline trên nguồn dữ liệu và trả về báo cáo cùng đường dẫn thư mục phiên."""
         if self.config.save_output:
             self.session_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,17 +1,20 @@
-"""Suy luận hai giai đoạn bằng YOLO và liên kết không gian.
+"""Suy luận hai giai đoạn (Two-Stage Inference) bằng YOLO
+và liên kết không gian (Spatial Association).
 
-Giai đoạn 1: Mô hình YOLO phát hiện đối tượng người (Person) trong khung hình.
-Giai đoạn 2: Trích xuất vùng ảnh ROI người và đưa vào mô hình YOLO thứ 2 để nhận diện PPE
-(Mũ bảo hộ 'helmet'/'no-helmet', Áo phản quang 'vest'/'no-vest').
-Đặc biệt: Lưu lại bounding box của PPE và xác thực phân vùng cơ thể (Body-Zone Validation):
-- Mũ bảo hộ ('helmet', 'no-helmet') bắt buộc phải nằm ở vùng đầu (Head Zone: y <= 35% ROI).
-- Áo phản quang ('vest', 'no-vest') bắt buộc phải nằm ở vùng thân (Torso Zone: 30% <= y <= 75% ROI).
-Giảm rủi ro gán nhầm trang bị trong tình huống đám đông đứng sát nhau.
+Giai đoạn 1: Phát hiện đối tượng người (Person) trên khung hình gốc.
+Giai đoạn 2: Cắt vùng ảnh ROI người (với padding) và đưa vào mô hình YOLO thứ 2 để nhận diện PPE
+('helmet', 'no-helmet', 'vest', 'no-vest').
+
+Kiểm tra phân vùng giải phẫu cơ thể (Body-Zone Validation):
+- Mũ bảo hộ ('helmet', 'no-helmet') nằm ở vùng đầu (Head Zone: y <= 35% chiều cao người).
+- Áo phản quang ('vest', 'no-vest') nằm ở vùng thân (Torso Zone: 30% <= y <= 75% chiều cao người).
+Giúp giảm triệt để lỗi gán nhầm trang bị khi nhiều công nhân đứng sát nhau.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Protocol
 
 import cv2
@@ -22,6 +25,35 @@ from .crops import CropWindow, PersonCropBuilder
 from .models import PersonDetection, PPEDetection, PPEState, PPEStatus
 
 LOGGER = logging.getLogger(__name__)
+
+
+def read_image(path: Path | str) -> np.ndarray | None:
+    """Đọc ảnh an toàn trên mọi hệ điều hành (kể cả đường dẫn Unicode tiếng Việt trên Windows)."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        data = np.fromfile(str(p), dtype=np.uint8)
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception as err:
+        LOGGER.error("Lỗi đọc ảnh từ %s: %s", p, err)
+        return None
+
+
+def write_image(path: Path | str, image: np.ndarray) -> bool:
+    """Ghi ảnh an toàn trên mọi hệ điều hành (kể cả đường dẫn Unicode tiếng Việt trên Windows)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ext = p.suffix if p.suffix else ".jpg"
+    success, encoded = cv2.imencode(ext, image)
+    if not success:
+        return False
+    try:
+        encoded.tofile(str(p))
+        return True
+    except Exception as err:
+        LOGGER.error("Lỗi ghi ảnh vào %s: %s", p, err)
+        return False
 
 
 def select_device() -> str:
@@ -36,7 +68,7 @@ def select_device() -> str:
 
 
 def is_center_in_roi(box: list[float], roi_polygon: list[tuple[int, int]]) -> bool:
-    """Kiểm tra xem điểm tâm của bounding box có nằm trong vùng nguy hiểm ROI hay không."""
+    """Kiểm tra tâm của bounding box có nằm trong đa giác ROI hay không."""
     if not roi_polygon or len(roi_polygon) < 3:
         return True
 
@@ -77,15 +109,15 @@ def _clip_polygon(
 
 
 def _polygon_area(polygon: list[tuple[float, float]]) -> float:
-    """Tính diện tích đa giác bằng công thức dây giày."""
+    """Tính diện tích đa giác bằng công thức Shoelace."""
     if len(polygon) < 3:
         return 0.0
     return (
         abs(
             sum(
-                polygon[index][0] * polygon[(index + 1) % len(polygon)][1]
-                - polygon[(index + 1) % len(polygon)][0] * polygon[index][1]
-                for index in range(len(polygon))
+                polygon[i][0] * polygon[(i + 1) % len(polygon)][1]
+                - polygon[(i + 1) % len(polygon)][0] * polygon[i][1]
+                for i in range(len(polygon))
             )
         )
         / 2.0
@@ -93,7 +125,7 @@ def _polygon_area(polygon: list[tuple[float, float]]) -> float:
 
 
 def roi_overlap_ratio(box: list[float], roi_polygon: list[tuple[int, int]]) -> float:
-    """Tính diện tích giao giữa box và polygon chia cho diện tích box."""
+    """Tính tỷ lệ diện tích giao giữa box và đa giác ROI trên diện tích box."""
     if not roi_polygon or len(roi_polygon) < 3:
         return 1.0
     x1, y1, x2, y2 = box
@@ -114,7 +146,7 @@ def roi_overlap_ratio(box: list[float], roi_polygon: list[tuple[int, int]]) -> f
 def is_box_overlapping_roi(
     box: list[float], roi_polygon: list[tuple[int, int]], min_overlap: float = 0.3
 ) -> bool:
-    """Kiểm tra đúng tỷ lệ diện tích box nằm trong polygon ROI."""
+    """Kiểm tra diện tích box nằm trong đa giác ROI có đạt ngưỡng tối thiểu không."""
     if not 0.0 <= min_overlap <= 1.0:
         raise ValueError("min_overlap phải nằm trong khoảng từ 0.0 đến 1.0.")
     return roi_overlap_ratio(box, roi_polygon) >= min_overlap
@@ -126,7 +158,7 @@ def is_box_in_roi_policy(
     rule: str,
     min_overlap: float,
 ) -> bool:
-    """Áp dụng đúng rule ROI đã khai báo trong runtime policy."""
+    """Kiểm tra box thỏa mãn quy tắc ROI cấu hình."""
     if not roi_polygon or len(roi_polygon) < 3:
         return True
     if rule not in {"center", "overlap", "center_or_overlap"}:
@@ -150,19 +182,20 @@ def validate_body_zone(
     torso_max: float = 0.75,
     head_min: float = 0.0,
 ) -> bool:
-    """Kiểm tra xem phát hiện PPE có nằm đúng phân vùng giải phẫu cơ thể tương ứng không.
+    """Kiểm tra phát hiện PPE có nằm đúng phân vùng giải phẫu cơ thể tương ứng không.
 
     Args:
         label: Tên nhãn ('helmet', 'no-helmet', 'vest', 'no-vest').
-        box: Tọa độ bbox [x1, y1, x2, y2] tính theo pixel trong ROI.
-        roi_h: Chiều cao của vùng ROI người.
-        roi_w: Chiều rộng của vùng ROI người.
+        box: Tọa độ bbox [x1, y1, x2, y2] tính theo pixel trong ROI người.
+        roi_h: Chiều cao ROI người.
+        roi_w: Chiều rộng ROI người.
         head_max: Tỷ lệ chiều cao tối đa cho vùng đầu (mặc định: 35%).
         torso_min: Tỷ lệ chiều cao tối thiểu cho vùng thân (mặc định: 30%).
         torso_max: Tỷ lệ chiều cao tối đa cho vùng thân (mặc định: 75%).
+        head_min: Tỷ lệ chiều cao tối thiểu cho vùng đầu (mặc định: 0%).
 
     Returns:
-        True nếu phát hiện nằm đúng phân vùng giải phẫu hợp lệ, ngược lại False.
+        True nếu vị trí PPE hợp lệ với giải phẫu cơ thể.
     """
     if roi_h <= 0 or roi_w <= 0:
         return False
@@ -171,34 +204,26 @@ def validate_body_zone(
     clean_label = label.strip().lower().replace("_", "-").replace(" ", "-")
 
     if clean_label in ("helmet", "no-helmet"):
-        # Mũ phải nằm trong vùng đầu của person box gốc.
         return head_min <= norm_y_center <= head_max
     if clean_label in ("vest", "no-vest"):
-        # Áo phản quang phải nằm ở vùng thân giữa
         return torso_min <= norm_y_center <= torso_max
 
     return True
 
 
 class DetectorProtocol(Protocol):
-    """Protocol chuẩn cho các lớp detector trong ứng dụng."""
+    """Protocol cho các lớp detector."""
 
-    def detect(self, frame: np.ndarray) -> list[PersonDetection]:
-        """Phát hiện danh sách đối tượng người và PPE trên khung hình."""
-        ...
+    def detect(self, frame: np.ndarray) -> list[PersonDetection]: ...
 
-    def detect_persons(self, frame: np.ndarray) -> list[tuple[list[float], float]]:
-        """Chỉ phát hiện đối tượng người (phục vụ luồng Track-First)."""
-        ...
+    def detect_persons(self, frame: np.ndarray) -> list[tuple[list[float], float]]: ...
 
     def analyze_ppe_for_roi(
         self,
         roi: np.ndarray,
         person_box: list[float] | None = None,
         crop_window: CropWindow | None = None,
-    ) -> PPEStatus:
-        """Nhận diện PPE và kiểm tra liên kết không gian cho một vùng ROI người."""
-        ...
+    ) -> PPEStatus: ...
 
 
 class DualModelDetector:
@@ -217,7 +242,7 @@ class DualModelDetector:
         self.ppe_model.to(self.device)
 
     def detect_persons(self, frame: np.ndarray) -> list[tuple[list[float], float]]:
-        """Phát hiện các bounding box người trên khung hình nguyên bản."""
+        """Giai đoạn 1: Phát hiện bounding box người trên khung hình gốc."""
         if frame is None or frame.size == 0:
             raise ValueError("Khung hình đầu vào rỗng.")
 
@@ -262,7 +287,7 @@ class DualModelDetector:
         person_box: list[float] | None = None,
         crop_window: CropWindow | None = None,
     ) -> PPEStatus:
-        """Nhận diện trang bị bảo hộ trên vùng ảnh cắt của người kèm lọc không gian giải phẫu."""
+        """Giai đoạn 2: Nhận diện PPE trên ảnh crop người kèm bộ lọc vị trí giải phẫu cơ thể."""
         if roi is None or roi.size == 0:
             return PPEStatus()
 
@@ -295,7 +320,7 @@ class DualModelDetector:
             xyxy = box.xyxy[0].cpu().tolist()
             b_box = [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])]
 
-            # Map từ tọa độ crop về tọa độ person box gốc trước khi kiểm tra zone.
+            # Map từ tọa độ crop về tọa độ person box gốc trước khi kiểm tra zone
             original_box = [
                 b_box[0] + crop_window.x1 - person_box[0],
                 b_box[1] + crop_window.y1 - person_box[1],
@@ -313,7 +338,7 @@ class DualModelDetector:
                 torso_max=self.config.torso_zone_max,
             ):
                 LOGGER.debug(
-                    "Bỏ qua phát hiện [%s] tại vị trí y=%.2f vì sai phân vùng cơ thể.",
+                    "Bỏ qua [%s] tại vị trí y=%.2f vì không đúng vùng cơ thể.",
                     name,
                     (b_box[1] + b_box[3]) / (2.0 * roi_h),
                 )
@@ -324,7 +349,7 @@ class DualModelDetector:
         return self._build_ppe_status(labels)
 
     def detect(self, frame: np.ndarray) -> list[PersonDetection]:
-        """Phát hiện người và PPE trên khung hình theo hai giai đoạn."""
+        """Quy trình hoàn chỉnh hai giai đoạn trên một khung hình."""
         if frame is None or frame.size == 0:
             raise ValueError("Khung hình đầu vào rỗng.")
 
@@ -338,10 +363,8 @@ class DualModelDetector:
                 person_box=p_box,
                 crop_window=crop_window,
             )
-
             detections.append(
                 PersonDetection(
-                    # Giữ box người nguyên bản; padding chỉ dùng cho ảnh crop.
                     box=p_box,
                     confidence=p_conf,
                     ppe=ppe_status,
@@ -351,7 +374,7 @@ class DualModelDetector:
         return detections
 
     def _build_ppe_status(self, labels: list[PPEDetection]) -> PPEStatus:
-        """Phân tích logic vi phạm dựa trên confidence, conflict_margin và scores."""
+        """Phân tích trạng thái PPE dựa trên confidence và conflict_margin."""
         helmet_scores = [
             item.confidence for item in labels if self._normalize(item.label) == "helmet"
         ]
@@ -392,7 +415,7 @@ class DualModelDetector:
         return label.strip().lower().replace("_", "-").replace(" ", "-")
 
     def _resolve_state(self, present_score: float, absent_score: float) -> PPEState:
-        """Giải quyết PRESENT/ABSENT/UNKNOWN theo ngưỡng và conflict margin."""
+        """Giải quyết trạng thái PRESENT / ABSENT / UNKNOWN theo ngưỡng và conflict margin."""
         present = present_score >= self.config.ppe_confidence
         absent = absent_score >= self.config.ppe_confidence
         if absent and absent_score > present_score + self.config.conflict_margin:
@@ -400,199 +423,3 @@ class DualModelDetector:
         if present and present_score > absent_score + self.config.conflict_margin:
             return PPEState.PRESENT
         return PPEState.UNKNOWN
-
-
-class SyntheticDemoDetector:
-    """Detector mô phỏng pipeline giả lập phục vụ thử nghiệm và demo không cần weights ngoài."""
-
-    def __init__(self, config: DetectionConfig) -> None:
-        self.config = config
-        self.frame_counter = 0
-        LOGGER.info("Khởi chạy SyntheticDemoDetector (Chế độ mô phỏng pipeline - Zero-Setup).")
-
-    def detect_persons(self, frame: np.ndarray) -> list[tuple[list[float], float]]:
-        """Mô phỏng phát hiện các vị trí người."""
-        if frame is None or frame.size == 0:
-            raise ValueError("Khung hình đầu vào rỗng.")
-
-        self.frame_counter += 1
-        height, width = frame.shape[:2]
-        w, h = int(width * 0.2), int(height * 0.5)
-
-        x1_a = int(width * 0.15 + np.sin(self.frame_counter * 0.05) * 15)
-        y1_a = int(height * 0.25)
-
-        x1_b = int(width * 0.6 + np.cos(self.frame_counter * 0.05) * 15)
-        y1_b = int(height * 0.2)
-
-        candidates = [
-            ([float(x1_a), float(y1_a), float(x1_a + w), float(y1_a + h)], 0.92),
-            ([float(x1_b), float(y1_b), float(x1_b + w), float(y1_b + h)], 0.88),
-        ]
-
-        if self.config.roi_polygon:
-            return [
-                c
-                for c in candidates
-                if is_box_in_roi_policy(
-                    c[0],
-                    self.config.roi_polygon,
-                    self.config.roi_rule,
-                    self.config.roi_overlap_threshold,
-                )
-            ]
-        return candidates
-
-    def analyze_ppe_for_roi(
-        self,
-        roi: np.ndarray,
-        person_box: list[float] | None = None,
-        crop_window: CropWindow | None = None,
-    ) -> PPEStatus:
-        """Mô phỏng phân tích trạng thái PPE cho một vùng ROI."""
-        roi_h, roi_w = (roi.shape[:2]) if (roi is not None and roi.size > 0) else (100, 100)
-        # Giả lập mặc định vi phạm theo frame counter chẵn lẻ
-        is_violating = (self.frame_counter // 20) % 2 == 1
-
-        if is_violating:
-            detections = [
-                PPEDetection(
-                    label="no-helmet",
-                    confidence=0.85,
-                    box=[
-                        float(roi_w * 0.2),
-                        float(roi_h * 0.05),
-                        float(roi_w * 0.8),
-                        float(roi_h * 0.30),
-                    ],
-                ),
-                PPEDetection(
-                    label="no-vest",
-                    confidence=0.82,
-                    box=[
-                        float(roi_w * 0.1),
-                        float(roi_h * 0.35),
-                        float(roi_w * 0.9),
-                        float(roi_h * 0.70),
-                    ],
-                ),
-            ]
-            return PPEStatus(
-                detections=detections,
-                helmet_state=PPEState.ABSENT,
-                vest_state=PPEState.ABSENT,
-                no_helmet_score=0.85,
-                no_vest_score=0.82,
-                helmet_evidence=detections[:1],
-                vest_evidence=detections[1:],
-            )
-        else:
-            detections = [
-                PPEDetection(
-                    label="helmet",
-                    confidence=0.89,
-                    box=[
-                        float(roi_w * 0.2),
-                        float(roi_h * 0.05),
-                        float(roi_w * 0.8),
-                        float(roi_h * 0.30),
-                    ],
-                ),
-                PPEDetection(
-                    label="vest",
-                    confidence=0.86,
-                    box=[
-                        float(roi_w * 0.1),
-                        float(roi_h * 0.35),
-                        float(roi_w * 0.9),
-                        float(roi_h * 0.70),
-                    ],
-                ),
-            ]
-            return PPEStatus(
-                detections=detections,
-                helmet_state=PPEState.PRESENT,
-                vest_state=PPEState.PRESENT,
-                helmet_score=0.89,
-                vest_score=0.86,
-                helmet_evidence=detections[:1],
-                vest_evidence=detections[1:],
-            )
-
-    def detect(self, frame: np.ndarray) -> list[PersonDetection]:
-        """Tạo đối tượng mô phỏng với bounding box và vi phạm trên ảnh."""
-        if frame is None or frame.size == 0:
-            raise ValueError("Khung hình đầu vào rỗng.")
-
-        self.frame_counter += 1
-        height, width = frame.shape[:2]
-        detections: list[PersonDetection] = []
-
-        w, h = int(width * 0.2), int(height * 0.5)
-        x1_a = int(width * 0.15 + np.sin(self.frame_counter * 0.05) * 15)
-        y1_a = int(height * 0.25)
-        det_a = PersonDetection(
-            box=[float(x1_a), float(y1_a), float(x1_a + w), float(y1_a + h)],
-            confidence=0.92,
-            ppe=PPEStatus(
-                detections=[
-                    PPEDetection(
-                        label="helmet",
-                        confidence=0.89,
-                        box=[10.0, 5.0, float(w - 10), float(h * 0.28)],
-                    ),
-                    PPEDetection(
-                        label="vest",
-                        confidence=0.86,
-                        box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)],
-                    ),
-                ],
-                helmet_state=PPEState.PRESENT,
-                vest_state=PPEState.PRESENT,
-                helmet_score=0.89,
-                vest_score=0.86,
-            ),
-        )
-        detections.append(det_a)
-
-        x1_b = int(width * 0.6 + np.cos(self.frame_counter * 0.05) * 15)
-        y1_b = int(height * 0.2)
-        det_b = PersonDetection(
-            box=[float(x1_b), float(y1_b), float(x1_b + w), float(y1_b + h)],
-            confidence=0.88,
-            ppe=PPEStatus(
-                detections=[
-                    PPEDetection(
-                        label="no-helmet",
-                        confidence=0.85,
-                        box=[10.0, 5.0, float(w - 10), float(h * 0.28)],
-                    ),
-                    PPEDetection(
-                        label="no-vest",
-                        confidence=0.81,
-                        box=[5.0, float(h * 0.35), float(w - 5), float(h * 0.70)],
-                    ),
-                ],
-                helmet_state=PPEState.ABSENT,
-                vest_state=PPEState.ABSENT,
-                no_helmet_score=0.85,
-                no_vest_score=0.81,
-            ),
-        )
-        detections.append(det_b)
-
-        if self.config.roi_polygon:
-            return [
-                detection
-                for detection in detections
-                if is_box_in_roi_policy(
-                    detection.box,
-                    self.config.roi_polygon,
-                    self.config.roi_rule,
-                    self.config.roi_overlap_threshold,
-                )
-            ]
-        return detections
-
-
-MockDetector = SyntheticDemoDetector
