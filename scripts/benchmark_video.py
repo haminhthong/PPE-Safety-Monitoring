@@ -32,13 +32,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("benchmark")
 
 
-def benchmark_video(video_path: str, config_path: str = "configs/config.yaml") -> dict:
+def benchmark_video(
+    video_path: str,
+    config_path: str = "configs/config.yaml",
+    person_model_path: str | None = None,
+    ppe_model_path: str | None = None,
+) -> dict:
     video_file = Path(video_path)
     if not video_file.is_file():
         raise FileNotFoundError(f"Không tìm thấy file video: {video_path}")
 
     config = DetectionConfig.load_from_yaml(
         config_path,
+        person_model_path=person_model_path,
+        ppe_model_path=ppe_model_path,
         save_output=False,
         save_snapshots=False,
         show_window=False,
@@ -101,9 +108,19 @@ def main() -> None:
     parser.add_argument(
         "--config", default="configs/config.yaml", help="Đường dẫn file cấu hình YAML"
     )
+    parser.add_argument(
+        "--person-model",
+        required=True,
+        help="Đường dẫn model YOLO phát hiện người",
+    )
+    parser.add_argument(
+        "--ppe-model",
+        required=True,
+        help="Đường dẫn model YOLO phát hiện PPE",
+    )
     args = parser.parse_args()
 
-    benchmark_video(args.video, args.config)
+    benchmark_video(args.video, args.config, args.person_model, args.ppe_model)
 
 
 if __name__ == "__main__":

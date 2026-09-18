@@ -1,8 +1,8 @@
 # YOLO Data Configuration for PPE Detection
 path: data/dataset_ppe
-train: manifests/train.txt
-val: manifests/val.txt
-test: manifests/test.txt
+train: train/images
+val: val/images
+test: test/images
 
 # Class mapping (PPE classes)
 names:
