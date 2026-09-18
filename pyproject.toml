@@ -8,4 +8,4 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --basetemp=.tmp_pytest -p no:cacheprovider"
+addopts = "-v -p no:cacheprovider"
